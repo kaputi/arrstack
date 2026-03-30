@@ -1,0 +1,217 @@
+networks:
+  arrstack_network:
+    external: false
+
+services:
+#-----------------------------------------------------------
+# RADARR
+#-----------------------------------------------------------
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/radarr:/config
+      - ${MEDIA}/movies:/media 
+      - ${DOWNLOADS}:/downloads
+    networks:
+      - arrstack_network
+    ports:
+      - ${RADARR_PORT}:7878
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# SONARR
+#-----------------------------------------------------------
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/sonarr:/config
+      - ${MEDIA}/series:/series
+      - ${DOWNLOADS}:/downloads
+    networks:
+      - arrstack_network
+    ports:
+      - ${SONARR_PORT}:8989
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# BAZARR
+#-----------------------------------------------------------
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/bazarr:/config
+      - ${MEDIA}:/media
+    networks:
+      - arrstack_network
+    ports:
+      - ${BAZARR_PORT}:6767
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# PROWLARR
+#-----------------------------------------------------------
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/prowlarr:/config
+    networks:
+      - arrstack_network
+    ports:
+      - ${PROWLARR_PORT}:9696
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# OVERSEERR
+#-----------------------------------------------------------
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    init: true
+    container_name: seerr
+    environment:
+      - LOG_LEVEL=debug
+      - TZ=${TZ}
+    user: "${UID}:${GID}"
+    networks:
+      - arrstack_network
+    ports:
+      - ${SEERR_PORT}:5055
+    volumes:
+      - ${CONFIG}/seerr:/app/config
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/status || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# TRANSMISSION
+#-----------------------------------------------------------
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/transmission:/config
+      - ${DOWNLOADS}:/downloads
+    networks:
+      - arrstack_network
+    ports:
+      - ${TRANSMISSION_PORT}:9091
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# CLODUFLARE Tunnel
+#-----------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CF_TOKEN}
+    networks:
+      - arrstack_network
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# FLARESOLVER
+#-----------------------------------------------------------
+  # flaresolver: TODO: if neededs
+
+#-----------------------------------------------------------
+# HOMEPAGE
+#-----------------------------------------------------------
+    # homepage: TODO: if needed
+
+#-----------------------------------------------------------
+# PLEX
+#-----------------------------------------------------------
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    environment:
+      - TZ=${TZ}
+      - PUID=${UID}
+      - PGID=${GID}
+      - VERSION=docker
+    volumes:
+      - ${CONFIG}/plex:/config
+      - ${CONFIG}/plex-transcode:/transcode
+      - ${MEDIA}:/media
+    # network_mode: host # once the migration happens, use this  and delete the others
+    # TO DELETE start-----
+    networks:
+      - arrstack_network
+    ports:
+      - ${PLEX_PORT}:32400
+    # TO DELETE end-------
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# TAUTULLI
+#-----------------------------------------------------------
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    container_name: tautulli
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG}/tautulli:/config
+    networks:
+      - arrstack_network
+    ports:
+      - ${TAUTULLI_PORT}:8181
+    restart: unless-stopped
+
+#-----------------------------------------------------------
+# JELLYFIN
+#-----------------------------------------------------------
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      - PUID=${UID}
+      - PGID=${GID}
+      - TZ=${TZ}
+      # - JELLYFIN_PublishedServerUrl=${JELLYFIN_PUBLISHED_URL} #optional
+      # - ROC_ENABLE_PRE_VEGA=1
+    volumes:
+      - ${CONFIG}/jellyfin:/config
+      - ${CONFIG}/jellyfin-cache:/cache
+      - ${CONFIG}/jellyfin-transcodes:/transocdes
+      - ${MEDIA}:/media
+    networks:
+      - arrstack_network
+    ports:
+      - ${JELLYFIN_PORT}:8096
+    restart: unless-stopped
+    # group_add:
+      # - ${RENDERER_GROUP}
+      # - ${VIDEO_GROUP}
+    # devices:
+    #   - /dev/dri/renderD128:/dev/dri/renderD128
+    #   - /dev/dri/card1:/dev/dri/card0
+
