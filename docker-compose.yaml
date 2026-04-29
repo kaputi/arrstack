@@ -1,102 +1,134 @@
+# arrStack — rootless Docker sandbox
+#
+# IMPORTANT (PUID/PGID convention):
+# Under rootless Docker, container UID 0 maps to the host `arrstack` user via
+# the userns mapping. We set PUID=0 / PGID=0 (or `user: "0:0"` / PLEX_UID=0)
+# in every service so that files written into bind mounts come out owned by
+# `arrstack:arrstack` on the host. This *inverts* the usual lscr.io
+# convention of PUID=1000 — do not change without understanding the userns
+# implications.
+
 networks:
   arrstack_network:
     external: false
 
 services:
-#-----------------------------------------------------------
-# RADARR
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # TRANSMISSION
+  #---------------------------------------------------------------------------
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ}
+    volumes:
+      - ${ARR1_ROOT}/config/transmission:/config
+      - ${ARR1_ROOT}/downloads:/downloads
+    networks:
+      - arrstack_network
+    ports:
+      - ${TRANSMISSION_PORT}:9091
+    restart: unless-stopped
+
+  #---------------------------------------------------------------------------
+  # RADARR
+  #---------------------------------------------------------------------------
   radarr:
     image: lscr.io/linuxserver/radarr:latest
     container_name: radarr
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
     volumes:
-      - ${CONFIG}/radarr:/config
-      - ${MEDIA}/movies:/media 
-      - ${DOWNLOADS}:/downloads
+      - ${ARR1_ROOT}/config/radarr:/config
+      - ${ARR1_ROOT}/media/movies:/movies
+      - ${ARR1_ROOT}/media/movies_4k:/movies_4k
+      - ${ARR2_ROOT}/media/movies:/movies2
+      - ${ARR1_ROOT}/downloads:/downloads
     networks:
       - arrstack_network
     ports:
       - ${RADARR_PORT}:7878
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# SONARR
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # SONARR
+  #---------------------------------------------------------------------------
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
     container_name: sonarr
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
     volumes:
-      - ${CONFIG}/sonarr:/config
-      - ${MEDIA}/series:/series
-      - ${DOWNLOADS}:/downloads
+      - ${ARR1_ROOT}/config/sonarr:/config
+      - ${ARR1_ROOT}/media/series:/series
+      - ${ARR1_ROOT}/downloads:/downloads
     networks:
       - arrstack_network
     ports:
       - ${SONARR_PORT}:8989
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# BAZARR
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # BAZARR
+  #---------------------------------------------------------------------------
   bazarr:
     image: lscr.io/linuxserver/bazarr:latest
     container_name: bazarr
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
     volumes:
-      - ${CONFIG}/bazarr:/config
-      - ${MEDIA}:/media
+      - ${ARR1_ROOT}/config/bazarr:/config
+      - ${ARR1_ROOT}/media:/media
+      - ${ARR2_ROOT}/media:/media2
     networks:
       - arrstack_network
     ports:
       - ${BAZARR_PORT}:6767
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# PROWLARR
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # PROWLARR
+  #---------------------------------------------------------------------------
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
     volumes:
-      - ${CONFIG}/prowlarr:/config
+      - ${ARR1_ROOT}/config/prowlarr:/config
     networks:
       - arrstack_network
     ports:
       - ${PROWLARR_PORT}:9696
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# OVERSEERR
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # SEERR (Overseerr fork)
+  #---------------------------------------------------------------------------
   seerr:
     image: ghcr.io/seerr-team/seerr:latest
     init: true
     container_name: seerr
+    user: "0:0"
     environment:
       - LOG_LEVEL=debug
       - TZ=${TZ}
-    user: "${UID}:${GID}"
+    volumes:
+      - ${ARR1_ROOT}/config/seerr:/app/config
     networks:
       - arrstack_network
     ports:
       - ${SEERR_PORT}:5055
-    volumes:
-      - ${CONFIG}/seerr:/app/config
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/status || exit 1
       start_period: 20s
@@ -105,113 +137,99 @@ services:
       retries: 3
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# TRANSMISSION
-#-----------------------------------------------------------
-  transmission:
-    image: lscr.io/linuxserver/transmission:latest
-    container_name: transmission
-    environment:
-      - PUID=${UID}
-      - PGID=${GID}
-      - TZ=${TZ}
-    volumes:
-      - ${CONFIG}/transmission:/config
-      - ${DOWNLOADS}:/downloads
-    networks:
-      - arrstack_network
-    ports:
-      - ${TRANSMISSION_PORT}:9091
-    restart: unless-stopped
-
-#-----------------------------------------------------------
-# CLODUFLARE Tunnel
-#-----------------------------------------------------------
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --token ${CF_TOKEN}
-    networks:
-      - arrstack_network
-    restart: unless-stopped
-
-#-----------------------------------------------------------
-# FLARESOLVER
-#-----------------------------------------------------------
-  # flaresolver: TODO: if neededs
-
-#-----------------------------------------------------------
-# HOMEPAGE
-#-----------------------------------------------------------
-    # homepage: TODO: if needed
-
-#-----------------------------------------------------------
-# PLEX
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # PLEX (official image; PLEX_UID=0 maps container plex user → host arrstack
+  # under rootless Docker, so config files come out owned correctly)
+  #---------------------------------------------------------------------------
   plex:
-    image: lscr.io/linuxserver/plex:latest
+    image: plexinc/pms-docker
     container_name: plex
     environment:
       - TZ=${TZ}
-      - PUID=${UID}
-      - PGID=${GID}
-      - VERSION=docker
+      - PLEX_UID=0
+      - PLEX_GID=0
     volumes:
-      - ${CONFIG}/plex:/config
-      - ${CONFIG}/plex-transcode:/transcode
-      - ${MEDIA}:/media
-    # network_mode: host # once the migration happens, use this  and delete the others
-    # TO DELETE start-----
+      - ${ARR1_ROOT}/config/plex:/config
+      - ${ARR1_ROOT}/config/plex-transcode:/transcode
+      - ${ARR1_ROOT}/media:/media
+      - ${ARR2_ROOT}/media/movies:/movies2
     networks:
       - arrstack_network
     ports:
-      - ${PLEX_PORT}:32400
-    # TO DELETE end-------
+      - 32400:32400/tcp     # Plex Web / API (required)
+      - 3005:3005/tcp       # Plex Companion (legacy clients)
+      - 8324:8324/tcp       # Plex for Roku Companion (legacy)
+      - 32469:32469/tcp     # DLNA server (kept for completeness; without 1900 it is effectively unused)
+      - 32410:32410/udp     # Plex GDM discovery — these four are how LAN clients find Plex without account sign-in
+      - 32412:32412/udp
+      - 32413:32413/udp
+      - 32414:32414/udp
+      # 1900/udp (DLNA SSDP) intentionally NOT bound — Spotify's desktop client
+      # holds UDP 1900 for Spotify Connect device discovery. Plex's DLNA feature
+      # is unused with our Shield + Plex.tv setup, so we drop the port to avoid
+      # the conflict. If you need DLNA later, quit Spotify and re-add the port.
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# TAUTULLI
-#-----------------------------------------------------------
+  #---------------------------------------------------------------------------
+  # TAUTULLI (host dir keeps the existing `tatulli` typo so the migrated DB
+  # resolves cleanly; container-side path is `/config` regardless)
+  #---------------------------------------------------------------------------
   tautulli:
     image: lscr.io/linuxserver/tautulli:latest
     container_name: tautulli
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
     volumes:
-      - ${CONFIG}/tautulli:/config
+      - ${ARR1_ROOT}/config/tatulli:/config
     networks:
       - arrstack_network
     ports:
       - ${TAUTULLI_PORT}:8181
     restart: unless-stopped
 
-#-----------------------------------------------------------
-# JELLYFIN
-#-----------------------------------------------------------
-  jellyfin:
-    image: lscr.io/linuxserver/jellyfin:latest
-    container_name: jellyfin
+  #---------------------------------------------------------------------------
+  # HOMEPAGE (LAN dashboard; configured post-boot)
+  #---------------------------------------------------------------------------
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
     environment:
-      - PUID=${UID}
-      - PGID=${GID}
+      - HOMEPAGE_ALLOWED_HOSTS=*
+      - PUID=0
+      - PGID=0
       - TZ=${TZ}
-      # - JELLYFIN_PublishedServerUrl=${JELLYFIN_PUBLISHED_URL} #optional
-      # - ROC_ENABLE_PRE_VEGA=1
     volumes:
-      - ${CONFIG}/jellyfin:/config
-      - ${CONFIG}/jellyfin-cache:/cache
-      - ${CONFIG}/jellyfin-transcodes:/transocdes
-      - ${MEDIA}:/media
+      - ${ARR1_ROOT}/config/homepage:/app/config
     networks:
       - arrstack_network
     ports:
-      - ${JELLYFIN_PORT}:8096
+      - ${HOMEPAGE_PORT}:3000
     restart: unless-stopped
-    # group_add:
-      # - ${RENDERER_GROUP}
-      # - ${VIDEO_GROUP}
-    # devices:
-    #   - /dev/dri/renderD128:/dev/dri/renderD128
-    #   - /dev/dri/card1:/dev/dri/card0
 
+  #---------------------------------------------------------------------------
+  # FLARESOLVERR (Cloudflare-challenge solver for Prowlarr; stateless)
+  #---------------------------------------------------------------------------
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+    networks:
+      - arrstack_network
+    ports:
+      - ${FLARESOLVERR_PORT}:8191
+    restart: unless-stopped
+
+  #---------------------------------------------------------------------------
+  # CLOUDFLARED — Phase 2; tunnels *arr admin UIs + Seerr only (NOT Plex,
+  # per Cloudflare TOS § 2.8 prohibiting video proxying on free plans).
+  #---------------------------------------------------------------------------
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   command: tunnel --no-autoupdate run --token ${CF_TOKEN}
+  #   networks:
+  #     - arrstack_network
+  #   restart: unless-stopped
