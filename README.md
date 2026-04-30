@@ -1260,5 +1260,3 @@ The following are out of scope for this tutorial:
 A media stack confined to a dedicated host user, with an explicit traversal-only ACL on the drive roots, automatic source-IP preservation through the bridge network, a clean edit-and-deploy workflow, and a verified validation point (Plex Now Playing showing real LAN IPs). A container compromise lands inside a non-privileged user namespace with access only to its declared bind mounts — your home, other Docker workloads, and host-level files all remain off-limits.
 
 Remote access is layered by trust level: Plex streams via a self-hosted Caddy reverse proxy with DNS-01 certs, Seerr is publicly reachable through a Cloudflare Tunnel with Plex SSO gating access, and Radarr/Sonarr admin is restricted to your Tailscale overlay network — no public DNS, no exposed ports, cryptographic device identity required.
-
-For deeper context on individual decisions and trade-offs, see `docs/decisions.md`.
