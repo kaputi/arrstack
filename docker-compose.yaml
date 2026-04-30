@@ -173,7 +173,7 @@ services:
   #---------------------------------------------------------------------------
   # CADDY (Phase 2.1: TLS termination + reverse proxy for public Plex access)
   # Host port 8443 → container 443 because the ISP router reserves port 443
-  # entirely (admin UI). Public URL is therefore https://plex.vasher.eu:8443.
+  # entirely (admin UI). Public URL is therefore https://domain:8443.
   #---------------------------------------------------------------------------
   caddy:
     build: ./caddy        # custom build with caddy-dns/cloudflare plugin (DNS-01)

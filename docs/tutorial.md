@@ -838,13 +838,13 @@ If you're doing **Section 17 (public HTTPS via Caddy)**, also add:
 
 ```bash
 # Caddy public — anywhere (this is the public path)
-sudo ufw allow 8443/tcp comment 'Caddy public (Plex HTTPS)'
-sudo ufw allow 8443/udp comment 'Caddy public (Plex HTTP/3)'
+sudo ufw allow 443/tcp comment 'Caddy public (Plex HTTPS)'
+sudo ufw allow 443/udp comment 'Caddy public (Plex HTTP/3)'
 ```
 
-> **Why scope the *arr UIs to LAN only**: those services have admin-grade access to your stack. They have their own auth (login required), but reducing the attack surface is cheap and obvious. Plex's web UI on 32400 is the same — Plex auth is solid, but no reason to expose it directly when Caddy on 8443 is the canonical public path.
+> **Why scope the *arr UIs to LAN only**: those services have admin-grade access to your stack. They have their own auth (login required), but reducing the attack surface is cheap and obvious. Plex's web UI on 32400 is the same — Plex auth is solid, but no reason to expose it directly when Caddy on 443 is the canonical public path.
 
-> **Why Caddy gets `anywhere`**: Caddy on 8443 *is* the public-facing path for Phase 2.1. Plex.tv discovery and your remote clients hit it from arbitrary IPs.
+> **Why Caddy gets `anywhere`**: Caddy on 443 *is* the public-facing path for Section 17. Plex.tv discovery and your remote clients hit it from arbitrary IPs.
 
 ### 16c. Enable UFW + the systemd unit
 
@@ -882,14 +882,18 @@ If you also use rootful Docker (`sudo systemctl status docker`) for dev workload
 
 ## 17. (Optional) Public HTTPS for Plex via Caddy + Cloudflare DDNS
 
-This section covers giving Plex a public URL on your own domain (e.g. `https://plex.vasher.eu:8443`) without depending on a third party for the data path. Skip if you only stream on the LAN.
+This section covers giving Plex a public URL on your own domain (e.g. `https://plex.example.com`) without depending on a third party for the data path. Skip if you only stream on the LAN.
 
-> **Note on the port suffix**: this tutorial assumes the public URL uses port `8443` rather than `443`. Reasons:
+> **Port 443 vs 8443**: this tutorial uses standard port `443`. If your ISP-supplied router reserves port 443 for its own admin UI (common — the symptom is the port-forward UI rejecting "Invalid port number" when you try to enter 443), use `8443` everywhere instead:
 >
-> 1. Many ISP-supplied routers reserve port 443 for their HTTPS admin and refuse to forward it.
-> 2. Many residential ISPs (Vodafone Ireland in our reference setup) block inbound port 80 entirely. We work around that by using ACME's DNS-01 challenge instead of HTTP-01 — no inbound port 80 needed.
+> 1. Router port-forward: external `8443` → internal `8443` (both fields).
+> 2. Compose: change `443:443` to `8443:443` and `443:443/udp` to `8443:443/udp`.
+> 3. Plex Custom server access URLs: append `:8443` to the public URL (e.g. `https://plex.example.com:8443`).
+> 4. UFW: change `443/tcp` and `443/udp` to `8443/tcp` and `8443/udp`.
 >
-> If your router lets you forward 443 freely, drop `:8443` and use plain `443` in the compose / Plex Custom URL. The rest of the design is unchanged.
+> The rest of the design — Caddyfile, DNS, DDNS, certs — is unchanged. Caddy always listens on container port 443 regardless of the host mapping.
+>
+> Some residential ISPs also block inbound port 80. This tutorial uses ACME DNS-01 for cert issuance (no inbound port 80 needed), so that's not a problem.
 
 ### 17a. Static IP for the host
 
@@ -932,10 +936,10 @@ Two rules at the home router (TCP and UDP for HTTP/3):
 
 | External port | Internal IP  | Internal port | Notes                  |
 |:--------------|:-------------|:--------------|:-----------------------|
-| 8443 (TCP)    | 192.168.1.88 | 8443          | Plex traffic via Caddy |
-| 8443 (UDP)    | 192.168.1.88 | 8443          | HTTP/3 (QUIC)          |
+| 443 (TCP)     | 192.168.1.88 | 443           | Plex traffic via Caddy |
+| 443 (UDP)     | 192.168.1.88 | 443           | HTTP/3 (QUIC)          |
 
-> If your router accepts port `443` in both fields, use `443:443` instead and drop the `:8443` from the public URL. Many ISP-supplied routers refuse 443 in *either* field; the symptom is the UI rejecting "Invalid port number" when you try to enter 443.
+> If your router rejects port 443 (see the note at the top of this section), substitute `8443` in both fields here and adjust the compose port mapping and Plex Custom URL accordingly.
 
 ### 17d. Add the Caddy service
 
@@ -981,8 +985,8 @@ Append two services to `docker-compose.yaml`:
     networks:
       - arrstack_network
     ports:
-      - 8443:443
-      - 8443:443/udp
+      - 443:443
+      - 443:443/udp
     restart: unless-stopped
 
   cloudflare-ddns:
@@ -1059,7 +1063,7 @@ That's the end-to-end success — DNS-01 validated, Let's Encrypt issued the cer
 
 Plex Web → `Settings → Server → Network`:
 
-- **Custom server access URLs**: `https://plex.example.com:8443, http://192.168.1.88:32400`
+- **Custom server access URLs**: `https://plex.example.com, http://192.168.1.88:32400`
   - Comma-separated. Public first, LAN second. Plex publishes both; clients try in order.
 - **Enable Remote Access**: **uncheck**. With Caddy as the public path, leaving Plex's own remote-access on causes the mobile/desktop apps to advertise multiple connection paths to plex.tv. Apps may pick the failed direct path first and throw "Decoder: init failed" errors.
 - **Secure connections**: **Preferred** (not Required). LAN clients keep using HTTP via the local IP (no cert mismatch); remote clients use HTTPS via Caddy.
@@ -1070,11 +1074,11 @@ Save.
 
 From a phone on cellular (off WiFi):
 
-1. Open `https://plex.example.com:8443` in a browser. Plex web UI loads, valid Let's Encrypt lock icon.
+1. Open `https://plex.example.com` in a browser. Plex web UI loads, valid Let's Encrypt lock icon.
 2. Open the Plex *app*, sign in if needed, play a media file. Should connect direct via Caddy with no Plex Relay banner.
 3. From the host, inspect the cert from outside (the local network can't talk to its own public IP via hairpin NAT on most routers, so this needs to be from cellular or use `--resolve` for a local test):
    ```bash
-   curl -vI --resolve plex.example.com:8443:127.0.0.1 https://plex.example.com:8443/ 2>&1 | grep -E "issuer|subject"
+   curl -vI --resolve plex.example.com:443:127.0.0.1 https://plex.example.com/ 2>&1 | grep -E "issuer|subject"
    ```
 
 LAN clients are unaffected — Plex's `LAN Networks` setting still classifies them via pasta source-IP preservation, and they use `http://192.168.1.88:32400` directly.
@@ -1087,7 +1091,7 @@ Three remote-access paths, each with a distinct trust model:
 
 | Service | Path                                             | Public DNS             | Auth                              |
 |:--------|:-------------------------------------------------|:-----------------------|:----------------------------------|
-| Plex    | Caddy at `https://plex.example.com:8443`         | DNS-only (gray cloud)  | Plex's own                        |
+| Plex    | Caddy at `https://plex.example.com`              | DNS-only (gray cloud)  | Plex's own                        |
 | Seerr   | Cloudflare Tunnel at `https://seerr.example.com` | proxied (orange cloud) | Plex SSO inside Seerr             |
 | Radarr  | Tailscale only at `http://<host>:7878`           | **none**               | Tailscale identity + Radarr login |
 | Sonarr  | Tailscale only at `http://<host>:8989`           | **none**               | same as Radarr                    |
@@ -1238,11 +1242,11 @@ The following are out of scope for this tutorial:
 | `dockerd-rootless-setuptool.sh: command not found`                                            | AUR package doesn't ship it                                                                                | You don't need it — the systemd user unit is pre-installed                                                                                       |                                                                                        |
 | Caddy log claims success but `ss -tlnp 'sport = :80'` is empty                                | Rootless Docker can't bind privileged ports without sysctl                                                 | `echo 'net.ipv4.ip_unprivileged_port_start=80' \                                                                                                 | sudo tee /etc/sysctl.d/99-arrstack-rootless.conf && sudo sysctl --system` (Section 8a) |
 | ACME HTTP-01 challenge times out from outside                                                 | ISP blocks inbound port 80 (common on residential, e.g. Vodafone IE)                                       | Switch to ACME DNS-01 via the `caddy-dns/cloudflare` plugin (Section 16d)                                                                        |                                                                                        |
-| Router rejects port 443 in port-forward UI: "Invalid port number"                             | ISP router reserves 443 for its own admin UI                                                               | Use 8443 in both Local Port and Remote Port fields; map host 8443 → container 443 in compose                                                     |                                                                                        |
+| Router rejects port 443 in port-forward UI: "Invalid port number"                             | ISP router reserves 443 for its own admin UI                                                               | Use 8443 in both Local Port and Remote Port fields; change compose to `8443:443`; append `:8443` to Plex Custom URL and UFW rules                |
 | Static IP set in NetworkManager GUI but `ip addr` shows old IP                                | GUI saves profile but doesn't apply until reconnect                                                        | `nmcli con down <name> && nmcli con up <name>`, or toggle WiFi off/on                                                                            |                                                                                        |
 | Plex mobile app: "Decoder: init failed" on remote playback                                    | Multiple advertised connection paths, app picks broken one                                                 | Plex Web → uncheck "Enable Remote Access". Caddy URL is sufficient via Custom URLs                                                               |                                                                                        |
 | `getent hosts <name>` returns Cloudflare anycast IPs after switching gray-cloud               | Local resolver cached old proxied result                                                                   | Use `getent ahostsv4 <name>` (IPv4-only) or DoH: `curl 'https://cloudflare-dns.com/dns-query?name=...&type=A' -H 'accept: application/dns-json'` |                                                                                        |
-| `openssl s_client -connect <pub-host>:8443` from host returns "No route to host"              | Hairpin NAT not supported by the router                                                                    | Test from cellular instead, or use `--resolve <host>:8443:127.0.0.1` to talk to local Caddy with proper SNI                                      |                                                                                        |
+| `openssl s_client -connect <pub-host>:443` from host returns "No route to host"               | Hairpin NAT not supported by the router                                                                    | Test from cellular instead, or use `--resolve <host>:443:127.0.0.1` to talk to local Caddy with proper SNI                                       |
 | Caddy DNS-01 fails: `HTTP 403: Invalid access token`                                          | Token typo in `.env`, or token rolled in CF                                                                | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify`                                     |                                                                                        |
 | `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path                                     | Remove the empty dir Docker created, ensure the source file exists, retry                                                                        |                                                                                        |
 | `arrcompose pull` fails: `Temporary failure in name resolution` after Tailscale install       | Tailscale replaced `/etc/resolv.conf` with its own DNS (`100.100.100.100`); rootless daemon can't reach it | Write `{"dns":["1.1.1.1","8.8.8.8"]}` to `/srv/arrstack/.config/docker/daemon.json` and restart the rootless daemon (Section 18d)                |                                                                                        |
