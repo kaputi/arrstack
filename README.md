@@ -12,10 +12,12 @@ Build a self-hosted media stack (Radarr, Sonarr, Bazarr, Prowlarr, Seerr, Transm
 
 ## Audience and assumptions
 
-You are setting up on a fresh-ish Arch Linux box. You have:
+This tutorial was written on Arch Linux. All `pacman` / `yay` commands can be swapped for your distro's package manager (`apt`, `dnf`, `zypper`, etc.) — the package names are usually the same or obvious equivalents. The one Arch-specific detail is `docker-rootless-extras`, which ships in the AUR; on Debian/Ubuntu this is included in the `docker-ce-rootless-extras` package from Docker's official repo.
+
+You have:
 
 - Root via `sudo`.
-- An AUR helper (`yay`, `paru`, or similar). If not, install one before starting — the rootless Docker tooling on Arch only ships in the AUR.
+- On Arch: an AUR helper (`yay`, `paru`, or similar). If not, install one before starting — the rootless Docker tooling on Arch only ships in the AUR.
 - One or more physical drives intended for arr data. Either fresh/unformatted, or already ext4-formatted with empty (or non-arr) content. Both cases are covered. This tutorial uses two drives as an example; adapt for your drive count by adding more `ARR<N>_ROOT` entries following the same pattern.
 - A LAN with a stable subnet (e.g. `192.168.1.0/24`) and a router you can reach.
 - Optional: Plex.tv account, Nvidia Shield (or similar Plex client) on the LAN to verify the source-IP preservation step.
@@ -340,7 +342,7 @@ sudo -iu arrstack docker ps
 
 This tutorial uses a **two-location** layout:
 
-- **Source-of-truth (your home)**: where you edit and version-control. Example: `~/code/arrStack/`.
+- **Source-of-truth (your home)**: where you edit and version-control. Example: `~/arrStack/`.
 - **Runtime (`/srv/arrstack/stack/`)**: where the rootless daemon actually reads from. Owned by arrstack, gitignored from your perspective.
 
 A small `deploy.sh` script syncs source → runtime. The `.env` lives only in the runtime location and never gets committed.
@@ -350,11 +352,11 @@ A small `deploy.sh` script syncs source → runtime. The `.env` lives only in th
 ### 10a. Create the repo
 
 ```bash
-mkdir -p ~/code/arrStack/scripts
-cd ~/code/arrStack
+mkdir -p ~/arrStack/scripts
+cd ~/arrStack
 ```
 
-Write `~/code/arrStack/docker-compose.yaml`:
+Write `~/arrStack/docker-compose.yaml`:
 
 ```yaml
 # arrStack — rootless Docker sandbox
@@ -551,7 +553,7 @@ services:
     restart: unless-stopped
 ```
 
-Write `~/code/arrStack/env.example`:
+Write `~/arrStack/env.example`:
 
 ```dotenv
 # arrStack environment
@@ -575,7 +577,7 @@ HOMEPAGE_PORT=3000
 FLARESOLVERR_PORT=8191
 ```
 
-Write `~/code/arrStack/.gitignore`:
+Write `~/arrStack/.gitignore`:
 
 ```
 .env
@@ -583,7 +585,7 @@ Write `~/code/arrStack/.gitignore`:
 
 ### 10b. Write the deploy script
 
-Save as `~/code/arrStack/scripts/deploy.sh`:
+Save as `~/arrStack/scripts/deploy.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -643,7 +645,7 @@ fi
 ### 10c. Run the first deploy
 
 ```bash
-bash ~/code/arrStack/scripts/deploy.sh
+bash ~/arrStack/scripts/deploy.sh
 ```
 
 The first run bootstraps `/srv/arrstack/stack/` (owned `arrstack:arrstack` mode `2775`), syncs the compose + env.example, and reports `.env: MISSING`.
@@ -662,7 +664,7 @@ In your editor, set `TZ` to your zone (`timedatectl | grep "Time zone"` if unsur
 Re-run:
 
 ```bash
-bash ~/code/arrStack/scripts/deploy.sh
+bash ~/arrStack/scripts/deploy.sh
 ```
 
 Should now report `compose parse: OK`.
@@ -1044,7 +1046,7 @@ fi
 ### 17f. Build and deploy
 
 ```bash
-bash ~/code/arrStack/scripts/deploy.sh
+bash ~/arrStack/scripts/deploy.sh
 arrcompose build caddy
 arrcompose up -d caddy cloudflare-ddns
 arrcompose logs --tail=30 -f caddy
@@ -1186,7 +1188,7 @@ The compose file already has the `cloudflared` service defined (uncommented in P
 Deploy and start:
 
 ```bash
-bash ~/code/arrStack/scripts/deploy.sh
+bash ~/arrStack/scripts/deploy.sh
 arrcompose up -d cloudflared
 arrcompose logs cloudflared --tail=20
 ```
