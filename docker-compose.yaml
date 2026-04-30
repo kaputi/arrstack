@@ -272,12 +272,13 @@ services:
     restart: unless-stopped
 
   #---------------------------------------------------------------------------
-  # CLOUDFLARED — Phase 2; tunnels *arr admin UIs + Seerr only (NOT Plex,
-  # per Cloudflare TOS § 2.8 prohibiting video proxying on free plans).
+  # CLOUDFLARED (Phase 2.2: CF Tunnel for public Seerr access via Plex SSO.
+  # Tunnel hostname configured in CF Zero Trust dashboard, not here.)
   #---------------------------------------------------------------------------
-  # cloudflared:
-  #   image: cloudflare/cloudflared:latest
-  #   command: tunnel --no-autoupdate run --token ${CF_TOKEN}
-  #   networks:
-  #     - arrstack_network
-  #   restart: unless-stopped
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    networks:
+      - arrstack_network
+    restart: unless-stopped

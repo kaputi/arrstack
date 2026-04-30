@@ -6,7 +6,7 @@ Build a self-hosted media stack (Radarr, Sonarr, Bazarr, Prowlarr, Seerr, Transm
 
 - A non-login system user (`arrstack`) running its own rootless Docker daemon — separate from your personal user's docker setup, with no access to your home or other parts of the host.
 - 10 services on a single bridge network, addressable by service name internally.
-- Two host directories (`/mnt/arr1`, `/mnt/arr2`) with arr data under a `mediaServer/` subdir on each, the rest of each drive free for personal use.
+- Two host directories (`/mnt/arr1`, `/mnt/arr2`) with arr data under a `mediaServer/` subdir on each, the rest of each drive free for personal use. (This tutorial uses two drives as an example — the pattern extends to any number. Drive 1 always holds configs and downloads; additional drives hold extra media directories.)
 - Plex serving LAN clients (e.g. Nvidia Shield) at full LAN-detected quality through bridge networking — no `network_mode: host` required.
 - Edit-and-deploy workflow: edit compose/env in your git checkout, `bash scripts/deploy.sh` to push to the runtime location.
 
@@ -16,11 +16,11 @@ You are setting up on a fresh-ish Arch Linux box. You have:
 
 - Root via `sudo`.
 - An AUR helper (`yay`, `paru`, or similar). If not, install one before starting — the rootless Docker tooling on Arch only ships in the AUR.
-- One or two physical drives intended for arr data. Either fresh/unformatted, or already ext4-formatted with empty (or non-arr) content. Both cases are covered.
+- One or more physical drives intended for arr data. Either fresh/unformatted, or already ext4-formatted with empty (or non-arr) content. Both cases are covered. This tutorial uses two drives as an example; adapt for your drive count by adding more `ARR<N>_ROOT` entries following the same pattern.
 - A LAN with a stable subnet (e.g. `192.168.1.0/24`) and a router you can reach.
 - Optional: Plex.tv account, Nvidia Shield (or similar Plex client) on the LAN to verify the source-IP preservation step.
 
-This tutorial does **not** cover migration of an existing arr stack — see the implementation plan in `docs/superpowers/plans/` for that. Section 16 adds a host firewall and Section 17 covers optional public HTTPS access for Plex; Cloudflare Tunnel for *arr admin UIs and Jellyfin GPU passthrough remain deferred Phase 2 items.
+This tutorial does **not** cover migration of an existing arr stack — it assumes a fresh install. Section 16 adds a host firewall, Section 17 covers optional public HTTPS access for Plex, and Section 18 adds remote admin access via Tailscale and public Seerr access via Cloudflare Tunnel.
 
 ## Conventions used here
 
@@ -928,10 +928,10 @@ DNS for your domain must be on Cloudflare (CF can be used as DNS-only even if yo
 
 Two rules at the home router (TCP and UDP for HTTP/3):
 
-| External port | Internal IP | Internal port | Notes |
-|---|---|---|---|
-| 8443 (TCP) | 192.168.1.88 | 8443 | Plex traffic via Caddy |
-| 8443 (UDP) | 192.168.1.88 | 8443 | HTTP/3 (QUIC) |
+| External port | Internal IP  | Internal port | Notes                  |
+|:--------------|:-------------|:--------------|:-----------------------|
+| 8443 (TCP)    | 192.168.1.88 | 8443          | Plex traffic via Caddy |
+| 8443 (UDP)    | 192.168.1.88 | 8443          | HTTP/3 (QUIC)          |
 
 > If your router accepts port `443` in both fields, use `443:443` instead and drop the `:8443` from the public URL. Many ISP-supplied routers refuse 443 in *either* field; the symptom is the UI rejecting "Invalid port number" when you try to enter 443.
 
@@ -1079,46 +1079,171 @@ LAN clients are unaffected — Plex's `LAN Networks` setting still classifies th
 
 ---
 
-## Phase 2 (still deferred)
+## Section 18 — Remote access: Tailscale (admin) + Cloudflare Tunnel (Seerr)
 
-The following are out of scope for this tutorial. Each is doable but introduces its own design trade-offs:
+Three remote-access paths, each with a distinct trust model:
 
-- **Cloudflare Tunnel for *arr admin UIs / Seerr**: straightforward addition. Add a `cloudflared` service to the compose, set `CF_TOKEN` in `.env`, configure your tunnel's public hostnames to forward to `http://radarr:7878` etc. **Do NOT tunnel Plex via the free Cloudflare plan** — Cloudflare's TOS § 2.8 prohibits proxying video, and tunnels regularly get terminated for streaming.
-- **Tailscale for personal access**: alternative to Section 16's public path. Each device installs Tailscale, gets a Tailscale IP, reaches Plex over the overlay network. No public ports needed, but only works on devices that can install Tailscale (your own; not arbitrary smart TVs / family members' devices).
+| Service | Path                                             | Public DNS             | Auth                              |
+|:--------|:-------------------------------------------------|:-----------------------|:----------------------------------|
+| Plex    | Caddy at `https://plex.example.com:8443`         | DNS-only (gray cloud)  | Plex's own                        |
+| Seerr   | Cloudflare Tunnel at `https://seerr.example.com` | proxied (orange cloud) | Plex SSO inside Seerr             |
+| Radarr  | Tailscale only at `http://<host>:7878`           | **none**               | Tailscale identity + Radarr login |
+| Sonarr  | Tailscale only at `http://<host>:8989`           | **none**               | same as Radarr                    |
+
+Radarr and Sonarr never get public DNS — they're reachable only through Tailscale's encrypted overlay network. Seerr stays publicly reachable for self-service media requests, but only authenticated Plex users can sign in.
+
+### 18a. Install Tailscale on the host
+
+Tailscale runs as a host service, not a container. It needs kernel-level networking access to manage the WireGuard interface — putting it inside rootless Docker would require `--privileged` or `NET_ADMIN`, defeating the sandbox.
+
+```bash
+sudo pacman -S --needed tailscale
+sudo systemctl enable --now tailscaled.service
+sudo tailscale up
+```
+
+The last command prints an auth URL — open it in a browser and sign in to your Tailscale account. Once authenticated:
+
+```bash
+tailscale status
+```
+
+You should see your host listed with a `100.x.x.x` IP and a MagicDNS hostname (`<machine-name>.<tailnet>.ts.net`).
+
+### 18b. Enable MagicDNS
+
+In the [Tailscale admin console → DNS](https://login.tailscale.com/admin/dns), toggle **MagicDNS** on. This gives every tailnet device a short hostname (e.g. `langoliers`) resolvable from any other tailnet device — no IP memorization needed.
+
+### 18c. UFW rules for Tailscale
+
+Allow tailnet clients to reach Radarr and Sonarr through the host firewall:
+
+```bash
+sudo ufw allow from 100.64.0.0/10 to any port 7878 proto tcp comment 'Radarr from tailnet'
+sudo ufw allow from 100.64.0.0/10 to any port 8989 proto tcp comment 'Sonarr from tailnet'
+```
+
+`100.64.0.0/10` is Tailscale's full CGNAT range — covers any device on your tailnet regardless of the specific IP assigned. No new rules needed for cloudflared (outbound-only tunnel, no inbound port).
+
+### 18d. Configure rootless Docker DNS
+
+Tailscale replaces `/etc/resolv.conf` with its own DNS resolver (`100.100.100.100`). The rootless Docker daemon (running as the `arrstack` user) may not be able to reach this resolver, causing image pulls and container DNS to fail.
+
+Fix by giving the rootless daemon explicit public DNS servers:
+
+```bash
+sudo mkdir -p /srv/arrstack/.config/docker
+sudo tee /srv/arrstack/.config/docker/daemon.json <<'EOF'
+{
+  "dns": ["1.1.1.1", "8.8.8.8"]
+}
+EOF
+sudo chown -R arrstack:arrstack /srv/arrstack/.config
+sudo systemctl --user --machine=arrstack@.host restart docker.service
+```
+
+Verify the daemon restarts cleanly:
+
+```bash
+arrcompose ps
+```
+
+### 18e. Cloudflare Tunnel for Seerr
+
+**Tunnel setup in the CF dashboard:**
+
+1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**.
+2. Create a new tunnel (or reuse an existing one). Copy the tunnel token from the install command.
+3. In the tunnel's **Public Hostname** tab, add: subdomain `seerr`, domain `example.com` → Service type `HTTP`, URL `seerr:5055`.
+4. Remove any stale hostname entries from previous setups.
+
+The URL uses the Docker service name (`seerr`) because cloudflared joins the same `arrstack_network` bridge — Docker's internal DNS resolves it.
+
+**Add the token to `.env`** at `/srv/arrstack/stack/.env`:
+
+```dotenv
+CF_TUNNEL_TOKEN=<token from the tunnel configure page>
+```
+
+The compose file already has the `cloudflared` service defined (uncommented in Phase 2.2):
+
+```yaml
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    networks:
+      - arrstack_network
+    restart: unless-stopped
+```
+
+Deploy and start:
+
+```bash
+bash ~/code/arrStack/scripts/deploy.sh
+arrcompose up -d cloudflared
+arrcompose logs cloudflared --tail=20
+```
+
+Look for a line like `Registered tunnel connection` — that confirms the tunnel is live. The CF dashboard should also show the tunnel as "Healthy."
+
+### 18f. Configure Seerr Plex SSO
+
+With `https://seerr.example.com` now reachable via the tunnel:
+
+1. **Settings → Plex**: enter the Plex server URL as `http://plex:32400` and your admin Plex token. Save.
+2. **Sign out**, then sign back in using **"Sign In With Plex"**. The first admin sign-in claims the admin role automatically.
+3. **Settings → Users**: verify your account shows as **Admin**. Other Plex users who sign in later get the **Regular** role by default (can request media, can't manage settings).
+
+To find your Plex token: Plex Web → open browser dev tools → make any navigation → look for `X-Plex-Token` in the request headers. Or extract it from Plex's config:
+
+```bash
+sudo -iu arrstack grep -oP 'PlexOnlineToken="\K[^"]+' \
+  /mnt/arr1/mediaServer/config/plex/Library/Application\ Support/Plex\ Media\ Server/Preferences.xml
+```
+
+### 18g. Verify
+
+1. **Tailscale → Radarr**: from a phone connected to Tailscale, open `http://<host-magicname>:7878`. Radarr UI loads.
+2. **Tailscale → Sonarr**: same with port `8989`.
+3. **Public Radarr/Sonarr blocked**: `nslookup radarr.example.com` should return NXDOMAIN — no DNS record exists.
+4. **Seerr public via tunnel**: from cellular (no Tailscale), open `https://seerr.example.com`. Login page loads with a valid Cloudflare-issued cert. "Sign in with Plex" works.
+5. **Seerr unauthenticated blocked**: an unauthenticated visitor cannot bypass the login page — no settings, no library data.
+
+---
+
+## Still deferred
+
+The following are out of scope for this tutorial:
+
 - **Jellyfin with GPU passthrough**: rootless Docker can pass through `/dev/dri` devices, but the `arrstack` user needs membership in the host's `render` and `video` groups. Add the Jellyfin service to the compose with `group_add` + `devices` blocks once you've confirmed your hardware path.
 - **Homepage configuration**: dashboard YAML at `/mnt/arr1/mediaServer/config/homepage/services.yaml`. Use service names (`radarr`, `sonarr`, etc.) as hostnames in widget configs — they survive any future host IP changes.
-- **Reverse-proxy for *arr UIs at `radarr.example.com` etc.**: extend the Caddy config from Section 16 with one block per service. Caddyfile gains:
-  ```
-  {$RADARR_HOSTNAME} {
-      reverse_proxy radarr:7878
-  }
-  ```
-  Pair with auth (e.g. Authelia or Caddy's `basic_auth` directive) since these aren't Plex-grade-protected. Add the same DNS records and DDNS targets.
 
 ---
 
 ## Troubleshooting cheat sheet
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `sudo -iu arrstack systemctl --user ...` fails with bus errors | `-i` doesn't reliably set DBUS env | Use `sudo systemctl --user --machine=arrstack@.host ...` |
-| `mount -a` shows drive RO with `WARNING: source write-protected` | Drive already mounted elsewhere with `-o ro` | `umount` the stray mount, retry |
-| Container fails with `permission denied` on bind mount | `arrstack` doesn't own the path / can't traverse | `chown -R arrstack:arrstack <path>`; `setfacl -m u:arrstack:x` on parent |
-| `docker compose up` errors with `address already in use` on UDP/1900 | Another LAN app (Spotify, KDE, etc.) holds SSDP | Drop `1900:1900/udp` from Plex's port list |
-| `docker.service` won't start: `network "pasta" requires port driver "none" or "implicit"` | Wrong `PORT_DRIVER` value | Set `DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit` |
-| `arrstack` group membership not visible in current shell | New group memberships only apply to new sessions | `newgrp arrstack` in current shell, or log out and back in |
-| Plex shows clients with bridge gateway IPs (172.x or 10.x) | pasta not engaged | Re-check `override.conf`; verify rootlesskit args contain `--net=pasta` |
-| `docker-rootless-extras` doesn't exist via `pacman` | It's only in AUR on Arch | `yay -S docker-rootless-extras` |
-| `dockerd-rootless-setuptool.sh: command not found` | AUR package doesn't ship it | You don't need it — the systemd user unit is pre-installed |
-| Caddy log claims success but `ss -tlnp 'sport = :80'` is empty | Rootless Docker can't bind privileged ports without sysctl | `echo 'net.ipv4.ip_unprivileged_port_start=80' \| sudo tee /etc/sysctl.d/99-arrstack-rootless.conf && sudo sysctl --system` (Section 8a) |
-| ACME HTTP-01 challenge times out from outside | ISP blocks inbound port 80 (common on residential, e.g. Vodafone IE) | Switch to ACME DNS-01 via the `caddy-dns/cloudflare` plugin (Section 16d) |
-| Router rejects port 443 in port-forward UI: "Invalid port number" | ISP router reserves 443 for its own admin UI | Use 8443 in both Local Port and Remote Port fields; map host 8443 → container 443 in compose |
-| Static IP set in NetworkManager GUI but `ip addr` shows old IP | GUI saves profile but doesn't apply until reconnect | `nmcli con down <name> && nmcli con up <name>`, or toggle WiFi off/on |
-| Plex mobile app: "Decoder: init failed" on remote playback | Multiple advertised connection paths, app picks broken one | Plex Web → uncheck "Enable Remote Access". Caddy URL is sufficient via Custom URLs |
-| `getent hosts <name>` returns Cloudflare anycast IPs after switching gray-cloud | Local resolver cached old proxied result | Use `getent ahostsv4 <name>` (IPv4-only) or DoH: `curl 'https://cloudflare-dns.com/dns-query?name=...&type=A' -H 'accept: application/dns-json'` |
-| `openssl s_client -connect <pub-host>:8443` from host returns "No route to host" | Hairpin NAT not supported by the router | Test from cellular instead, or use `--resolve <host>:8443:127.0.0.1` to talk to local Caddy with proper SNI |
-| Caddy DNS-01 fails: `HTTP 403: Invalid access token` | Token typo in `.env`, or token rolled in CF | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify` |
-| `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path | Remove the empty dir Docker created, ensure the source file exists, retry |
+| Symptom                                                                                       | Likely cause                                                                                               | Fix                                                                                                                                              |                                                                                        |
+|:----------------------------------------------------------------------------------------------|:-----------------------------------------------------------------------------------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------------|
+| `sudo -iu arrstack systemctl --user ...` fails with bus errors                                | `-i` doesn't reliably set DBUS env                                                                         | Use `sudo systemctl --user --machine=arrstack@.host ...`                                                                                         |                                                                                        |
+| `mount -a` shows drive RO with `WARNING: source write-protected`                              | Drive already mounted elsewhere with `-o ro`                                                               | `umount` the stray mount, retry                                                                                                                  |                                                                                        |
+| Container fails with `permission denied` on bind mount                                        | `arrstack` doesn't own the path / can't traverse                                                           | `chown -R arrstack:arrstack <path>`; `setfacl -m u:arrstack:x` on parent                                                                         |                                                                                        |
+| `docker compose up` errors with `address already in use` on UDP/1900                          | Another LAN app (Spotify, KDE, etc.) holds SSDP                                                            | Drop `1900:1900/udp` from Plex's port list                                                                                                       |                                                                                        |
+| `docker.service` won't start: `network "pasta" requires port driver "none" or "implicit"`     | Wrong `PORT_DRIVER` value                                                                                  | Set `DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit`                                                                                          |                                                                                        |
+| `arrstack` group membership not visible in current shell                                      | New group memberships only apply to new sessions                                                           | `newgrp arrstack` in current shell, or log out and back in                                                                                       |                                                                                        |
+| Plex shows clients with bridge gateway IPs (172.x or 10.x)                                    | pasta not engaged                                                                                          | Re-check `override.conf`; verify rootlesskit args contain `--net=pasta`                                                                          |                                                                                        |
+| `docker-rootless-extras` doesn't exist via `pacman`                                           | It's only in AUR on Arch                                                                                   | `yay -S docker-rootless-extras`                                                                                                                  |                                                                                        |
+| `dockerd-rootless-setuptool.sh: command not found`                                            | AUR package doesn't ship it                                                                                | You don't need it — the systemd user unit is pre-installed                                                                                       |                                                                                        |
+| Caddy log claims success but `ss -tlnp 'sport = :80'` is empty                                | Rootless Docker can't bind privileged ports without sysctl                                                 | `echo 'net.ipv4.ip_unprivileged_port_start=80' \                                                                                                 | sudo tee /etc/sysctl.d/99-arrstack-rootless.conf && sudo sysctl --system` (Section 8a) |
+| ACME HTTP-01 challenge times out from outside                                                 | ISP blocks inbound port 80 (common on residential, e.g. Vodafone IE)                                       | Switch to ACME DNS-01 via the `caddy-dns/cloudflare` plugin (Section 16d)                                                                        |                                                                                        |
+| Router rejects port 443 in port-forward UI: "Invalid port number"                             | ISP router reserves 443 for its own admin UI                                                               | Use 8443 in both Local Port and Remote Port fields; map host 8443 → container 443 in compose                                                     |                                                                                        |
+| Static IP set in NetworkManager GUI but `ip addr` shows old IP                                | GUI saves profile but doesn't apply until reconnect                                                        | `nmcli con down <name> && nmcli con up <name>`, or toggle WiFi off/on                                                                            |                                                                                        |
+| Plex mobile app: "Decoder: init failed" on remote playback                                    | Multiple advertised connection paths, app picks broken one                                                 | Plex Web → uncheck "Enable Remote Access". Caddy URL is sufficient via Custom URLs                                                               |                                                                                        |
+| `getent hosts <name>` returns Cloudflare anycast IPs after switching gray-cloud               | Local resolver cached old proxied result                                                                   | Use `getent ahostsv4 <name>` (IPv4-only) or DoH: `curl 'https://cloudflare-dns.com/dns-query?name=...&type=A' -H 'accept: application/dns-json'` |                                                                                        |
+| `openssl s_client -connect <pub-host>:8443` from host returns "No route to host"              | Hairpin NAT not supported by the router                                                                    | Test from cellular instead, or use `--resolve <host>:8443:127.0.0.1` to talk to local Caddy with proper SNI                                      |                                                                                        |
+| Caddy DNS-01 fails: `HTTP 403: Invalid access token`                                          | Token typo in `.env`, or token rolled in CF                                                                | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify`                                     |                                                                                        |
+| `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path                                     | Remove the empty dir Docker created, ensure the source file exists, retry                                                                        |                                                                                        |
+| `arrcompose pull` fails: `Temporary failure in name resolution` after Tailscale install       | Tailscale replaced `/etc/resolv.conf` with its own DNS (`100.100.100.100`); rootless daemon can't reach it | Write `{"dns":["1.1.1.1","8.8.8.8"]}` to `/srv/arrstack/.config/docker/daemon.json` and restart the rootless daemon (Section 18d)                |                                                                                        |
 
 ---
 
@@ -1126,4 +1251,6 @@ The following are out of scope for this tutorial. Each is doable but introduces 
 
 A media stack confined to a dedicated host user, with an explicit traversal-only ACL on the drive roots, automatic source-IP preservation through the bridge network, a clean edit-and-deploy workflow, and a verified validation point (Plex Now Playing showing real LAN IPs). A container compromise lands inside a non-privileged user namespace with access only to its declared bind mounts — your home, other Docker workloads, and host-level files all remain off-limits.
 
-For deeper context on individual decisions and trade-offs, see `docs/decisions.md`. For the migration path from an existing arr stack, see `docs/superpowers/plans/2026-04-28-arrstack-sandbox.md`.
+Remote access is layered by trust level: Plex streams via a self-hosted Caddy reverse proxy with DNS-01 certs, Seerr is publicly reachable through a Cloudflare Tunnel with Plex SSO gating access, and Radarr/Sonarr admin is restricted to your Tailscale overlay network — no public DNS, no exposed ports, cryptographic device identity required.
+
+For deeper context on individual decisions and trade-offs, see `docs/decisions.md`.
