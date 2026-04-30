@@ -667,6 +667,8 @@ bash ~/code/arrStack/scripts/deploy.sh
 
 Should now report `compose parse: OK`.
 
+> **Other scripts in the repo:** the `scripts/` directory may also contain `backup-configs.sh` (tarballs per-service config dirs with zstd compression) and `reorganize-drives.sh` (archives stale configs and sets up directory layout + ownership). These are tailored to a specific system's drive paths and service list — review and adjust the hardcoded paths before running them on your setup. For a fresh install following this tutorial, neither is needed: the directory layout is created in Section 4 and backups are up to you to schedule however you prefer.
+
 ---
 
 ## 11. First boot
