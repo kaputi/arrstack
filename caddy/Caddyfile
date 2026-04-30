@@ -1,0 +1,16 @@
+# Plex — public HTTPS reverse proxy
+# Hostname comes from PLEX_HOSTNAME env var (set in /srv/arrstack/stack/.env).
+# Caddy listens on container port 443; host maps 8443:443 because the
+# router reserves 443.
+#
+# Cert issuance via ACME DNS-01 challenge through Cloudflare's API. We
+# can't use HTTP-01 because inbound port 80 is blocked (firewall/ISP).
+# DNS-01 only needs outbound HTTPS to api.cloudflare.com, which always
+# works. Requires the caddy-dns/cloudflare plugin — see ./Dockerfile.
+
+{$PLEX_HOSTNAME} {
+    reverse_proxy plex:32400
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+}

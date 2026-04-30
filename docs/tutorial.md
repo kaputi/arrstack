@@ -1,6 +1,6 @@
 # arrStack Sandbox — From-Scratch Tutorial
 
-Build a self-hosted media stack (Radarr, Sonarr, Bazarr, Prowlarr, Seerr, Transmission, Plex, Tautulli, Homepage, Flaresolverr) on Arch Linux, sandboxed under a dedicated system user via rootless Docker. Bind-mount isolation, pasta source-IP preservation for LAN media clients, and a clean repo + deploy workflow.
+Build a self-hosted media stack (Radarr, Sonarr, Bazarr, Prowlarr, Seerr, Transmission, Plex, Tautulli, Homepage, Flaresolverr) on Arch Linux, sandboxed under a dedicated system user via rootless Docker. Bind-mount isolation, pasta source-IP preservation for LAN media clients, and a clean repo + deploy workflow. Section 16 sets up a host firewall (UFW); optional Section 17 covers public HTTPS access for Plex on your own domain via Caddy + Cloudflare DNS-01.
 
 ## What you'll end up with
 
@@ -20,7 +20,7 @@ You are setting up on a fresh-ish Arch Linux box. You have:
 - A LAN with a stable subnet (e.g. `192.168.1.0/24`) and a router you can reach.
 - Optional: Plex.tv account, Nvidia Shield (or similar Plex client) on the LAN to verify the source-IP preservation step.
 
-This tutorial does **not** cover migration of an existing arr stack — see the implementation plan in `docs/superpowers/plans/` for that. It also does not cover Cloudflare Tunnel, Plex remote access, or Jellyfin with GPU passthrough — those are deliberate Phase 2 items.
+This tutorial does **not** cover migration of an existing arr stack — see the implementation plan in `docs/superpowers/plans/` for that. Section 16 adds a host firewall and Section 17 covers optional public HTTPS access for Plex; Cloudflare Tunnel for *arr admin UIs and Jellyfin GPU passthrough remain deferred Phase 2 items.
 
 ## Conventions used here
 
@@ -267,7 +267,28 @@ EOF
 
 ---
 
-## 8. Configure rootless networking (pasta) and mount-dependency
+## 8. Configure rootless networking (pasta), mount-dependency, and unprivileged ports
+
+### 8a. Allow unprivileged binding of ports ≥ 80
+
+Linux reserves ports 0–1023 for root by default. Rootless Docker runs as the unprivileged `arrstack` user, so it cannot bind any port below 1024. Phase-1 services (Plex 32400, Radarr 7878, etc.) all use high ports, but anything you add later — Caddy on 80 or 443, for instance — silently fails to bind. Drop the threshold:
+
+```bash
+sudo tee /etc/sysctl.d/99-arrstack-rootless.conf > /dev/null <<'EOF'
+# Allow rootless Docker (arrstack user) to bind ports >=80.
+# Standard rootless-Docker setup step; the Arch docker-rootless-extras
+# package's sysctl drop-in only sets unprivileged_userns_clone, not this.
+net.ipv4.ip_unprivileged_port_start=80
+EOF
+
+sudo sysctl --system | grep ip_unprivileged_port_start
+```
+
+Expected: a line `net.ipv4.ip_unprivileged_port_start = 80`. Persists across reboots. Doesn't widen attack surface — root could already bind these; we're letting unprivileged users do the same.
+
+> **Why this isn't surfaced earlier:** every Phase-1 service uses ports ≥ 1024. Without this sysctl, rootless Caddy on 80 or 443 would bind silently fail (you'd see Caddy logs claiming success but `ss -tlnp` would show nothing on the port). Easier to set up now than to debug later.
+
+### 8b. Configure pasta + mount-dependency
 
 Drop a systemd-user override for arrstack's docker.service:
 
@@ -763,14 +784,316 @@ If all of those behave as commented, the sandbox is in shape.
 
 ---
 
-## Phase 2 (deferred, intentionally not covered here)
+## 16. Host firewall with UFW
+
+The rootless-Docker sandbox confines what a container compromise can reach. UFW adds a complementary layer at the host network level: even *non-containerized* processes can't accidentally expose a port on the LAN. It also lets you scope the arrStack web UIs to your LAN subnet only, so they're not reachable from the public internet even if the host's IP gets exposed.
+
+> **Why this wasn't in earlier sections**: the original threat model focused on container escapes and assumed the LAN was trusted. Adding a host firewall is defense in depth — small extra cost, real defensive value. Place it after the Phase-1 stack is verified working (debugging "is it the firewall?" issues with a stack that hasn't fully stabilised is no fun).
+
+### 16a. Install UFW (and the GUI, optionally)
+
+```bash
+sudo pacman -S --needed ufw
+# Optional GUI; safe to skip if you prefer CLI
+yay -S gufw
+```
+
+Installing UFW does *not* enable it. The firewall is inert until you `ufw enable` and start the systemd unit (next steps).
+
+### 16b. Set defaults and add allow rules — *before* enabling
+
+The order matters: queue all the rules first, *then* enable. If you enable UFW with no rules, every inbound connection drops — including any active SSH session if you're using one.
+
+```bash
+# Defaults: deny inbound, allow outbound
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+# SSH from LAN only — skip if you don't run sshd on this host
+sudo ufw allow from 192.168.1.0/24 to any port 22 proto tcp comment 'SSH from LAN'
+
+# arrStack web UIs — restricted to LAN clients
+LAN=192.168.1.0/24
+sudo ufw allow from $LAN to any port 7878 proto tcp comment 'Radarr'
+sudo ufw allow from $LAN to any port 8989 proto tcp comment 'Sonarr'
+sudo ufw allow from $LAN to any port 6767 proto tcp comment 'Bazarr'
+sudo ufw allow from $LAN to any port 9696 proto tcp comment 'Prowlarr'
+sudo ufw allow from $LAN to any port 5055 proto tcp comment 'Seerr'
+sudo ufw allow from $LAN to any port 9091 proto tcp comment 'Transmission'
+sudo ufw allow from $LAN to any port 8181 proto tcp comment 'Tautulli'
+sudo ufw allow from $LAN to any port 3000 proto tcp comment 'Homepage'
+sudo ufw allow from $LAN to any port 8191 proto tcp comment 'Flaresolverr'
+
+# Plex — direct LAN access (Shield, Plex apps on home WiFi)
+sudo ufw allow from $LAN to any port 32400 proto tcp comment 'Plex web/API'
+sudo ufw allow from $LAN to any port 3005 proto tcp comment 'Plex Companion'
+sudo ufw allow from $LAN to any port 8324 proto tcp comment 'Plex Roku Companion'
+sudo ufw allow from $LAN to any port 32469 proto tcp comment 'Plex DLNA'
+sudo ufw allow from $LAN to any port 32410:32414 proto udp comment 'Plex GDM discovery'
+```
+
+If you're doing **Section 17 (public HTTPS via Caddy)**, also add:
+
+```bash
+# Caddy public — anywhere (this is the public path)
+sudo ufw allow 8443/tcp comment 'Caddy public (Plex HTTPS)'
+sudo ufw allow 8443/udp comment 'Caddy public (Plex HTTP/3)'
+```
+
+> **Why scope the *arr UIs to LAN only**: those services have admin-grade access to your stack. They have their own auth (login required), but reducing the attack surface is cheap and obvious. Plex's web UI on 32400 is the same — Plex auth is solid, but no reason to expose it directly when Caddy on 8443 is the canonical public path.
+
+> **Why Caddy gets `anywhere`**: Caddy on 8443 *is* the public-facing path for Phase 2.1. Plex.tv discovery and your remote clients hit it from arbitrary IPs.
+
+### 16c. Enable UFW + the systemd unit
+
+```bash
+sudo ufw enable
+sudo systemctl enable --now ufw.service
+```
+
+`ufw enable` activates the rule set and persists it across reboots via UFW's own state file. The `systemctl enable --now` ensures the systemd service comes up early during boot to apply the rules before any containers start. Both are needed.
+
+If you get a "command may disrupt existing ssh connections" prompt, that's UFW being careful — answer `y` (you've already added the SSH rule above).
+
+### 16d. Verify
+
+```bash
+sudo ufw status verbose
+```
+
+Expected output: `Status: active`, default policies shown, then a list of every allow rule you added with the right port/protocol/source.
+
+From another LAN device (laptop, phone on home WiFi), test that web UIs still load:
+
+- `http://192.168.1.88:7878` (Radarr)
+- `http://192.168.1.88:32400/web` (Plex)
+- `http://192.168.1.88:8181` (Tautulli)
+- *(and any other you actively use)*
+
+If something doesn't load, the symptom is a fresh hang/timeout (not a fast 404). Check `sudo ufw status numbered` to confirm the rule for that port exists with the right source. To remove a wrong rule: `sudo ufw delete <number>`.
+
+### 16e. Caveat — rootful Docker bypasses UFW
+
+If you also use rootful Docker (`sudo systemctl status docker`) for dev workloads, **be aware that any container's `-p` port mapping bypasses UFW** because rootful Docker inserts its own iptables rules ahead of UFW's chains. This doesn't affect arrStack (rootless Docker via pasta — UFW works normally), but if you ever expose a dev container to the LAN and find UFW doesn't block it, that's why. The standard fix is to rule via the `DOCKER-USER` chain instead of the default UFW chains. Out of scope here; flagging only.
+
+---
+
+## 17. (Optional) Public HTTPS for Plex via Caddy + Cloudflare DDNS
+
+This section covers giving Plex a public URL on your own domain (e.g. `https://plex.vasher.eu:8443`) without depending on a third party for the data path. Skip if you only stream on the LAN.
+
+> **Note on the port suffix**: this tutorial assumes the public URL uses port `8443` rather than `443`. Reasons:
+>
+> 1. Many ISP-supplied routers reserve port 443 for their HTTPS admin and refuse to forward it.
+> 2. Many residential ISPs (Vodafone Ireland in our reference setup) block inbound port 80 entirely. We work around that by using ACME's DNS-01 challenge instead of HTTP-01 — no inbound port 80 needed.
+>
+> If your router lets you forward 443 freely, drop `:8443` and use plain `443` in the compose / Plex Custom URL. The rest of the design is unchanged.
+
+### 17a. Static IP for the host
+
+The router needs a stable internal IP for its port-forward target. Pick a free address in your LAN and pin it. Two ways:
+
+- **DHCP reservation on your router** (recommended — no host config). Find your WiFi/Ethernet MAC with `ip link show <iface>`, then in the router's DHCP page reserve that IP for that MAC.
+- **NetworkManager static** (host-side):
+  ```bash
+  nmcli con show --active
+  sudo nmcli con mod "<conn-name>" \
+    ipv4.method manual \
+    ipv4.addresses 192.168.1.88/24 \
+    ipv4.gateway 192.168.1.254 \
+    ipv4.dns "1.1.1.1 8.8.8.8"
+  sudo nmcli con down "<conn-name>" && sudo nmcli con up "<conn-name>"
+  ```
+
+> **Gotcha — NM GUI does NOT auto-apply**: if you use the NetworkManager GUI to set a static IP, the change is saved to the connection profile but doesn't take effect until the next connect. **Toggle WiFi off/on, or `nmcli con down ... && nmcli con up ...`**, otherwise you stay on the old DHCP lease and every downstream test (port-forward, cert issuance, etc.) silently fails because traffic forwarded to your "new" IP lands on a host that isn't actually there. Verify with `ip -4 addr show <iface>` after the supposed change.
+
+### 17b. Cloudflare prep — API token + placeholder DNS record
+
+DNS for your domain must be on Cloudflare (CF can be used as DNS-only even if your registrar is elsewhere). Then:
+
+1. **Create an API token**: Cloudflare dashboard → My Profile → API Tokens → Create Token → "Edit zone DNS" template. Zone Resources: `Include` → `Specific zone` → your domain. Save the token (you won't see it again).
+2. **Test the token**:
+   ```bash
+   curl -sS -H "Authorization: Bearer <token>" \
+     https://api.cloudflare.com/client/v4/user/tokens/verify | head
+   ```
+   Expected: `"success": true, "status": "active"`.
+3. **Add a placeholder A record**: Cloudflare → DNS → Add record. Type `A`, Name `plex` (or whatever you want), IPv4 = your current public IP (`curl -s4 ifconfig.me`), **Proxy status: DNS only (gray cloud, not orange)**, TTL Auto. Save.
+
+> **Why DNS-only and not proxied**: CF's proxy (orange cloud) terminates TLS at the edge and re-encrypts to your origin — defeats the "TLS terminated at home" property. It also re-introduces TOS § 2.8 (free CF can't proxy video). Gray cloud = CF is just authoritative DNS; clients connect directly to your home IP.
+
+> **CGNAT check**: confirm `curl -s4 ifconfig.me` matches what your router's WAN status page reports. If they differ, you're behind CGNAT and inbound forwarding can't work — design needs Tailscale/ZeroTier/paid tunnel instead.
+
+### 17c. Router port-forward
+
+Two rules at the home router (TCP and UDP for HTTP/3):
+
+| External port | Internal IP | Internal port | Notes |
+|---|---|---|---|
+| 8443 (TCP) | 192.168.1.88 | 8443 | Plex traffic via Caddy |
+| 8443 (UDP) | 192.168.1.88 | 8443 | HTTP/3 (QUIC) |
+
+> If your router accepts port `443` in both fields, use `443:443` instead and drop the `:8443` from the public URL. Many ISP-supplied routers refuse 443 in *either* field; the symptom is the UI rejecting "Invalid port number" when you try to enter 443.
+
+### 17d. Add the Caddy service
+
+In the repo, create `caddy/Dockerfile`:
+
+```Dockerfile
+FROM caddy:builder AS builder
+RUN xcaddy build \
+    --with github.com/caddy-dns/cloudflare
+
+FROM caddy:latest
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+```
+
+Multi-stage build that produces a Caddy binary with the `caddy-dns/cloudflare` plugin. Required for ACME DNS-01 — the standard Caddy image doesn't include DNS challenge providers.
+
+Create `caddy/Caddyfile`:
+
+```
+{$PLEX_HOSTNAME} {
+    reverse_proxy plex:32400
+    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }
+}
+```
+
+The `tls { dns cloudflare ... }` block forces ACME DNS-01. Without it (and without the plugin), Caddy falls back to HTTP-01 — which won't work if your ISP blocks inbound port 80.
+
+Append two services to `docker-compose.yaml`:
+
+```yaml
+  caddy:
+    build: ./caddy        # custom build with caddy-dns/cloudflare plugin
+    container_name: caddy
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${ARR1_ROOT}/config/caddy/data:/data
+      - ${ARR1_ROOT}/config/caddy/config:/config
+    environment:
+      - PLEX_HOSTNAME=${PLEX_HOSTNAME}
+      - CF_API_TOKEN=${CF_API_TOKEN}
+    networks:
+      - arrstack_network
+    ports:
+      - 8443:443
+      - 8443:443/udp
+    restart: unless-stopped
+
+  cloudflare-ddns:
+    image: favonia/cloudflare-ddns:latest
+    container_name: cloudflare-ddns
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CF_API_TOKEN}
+      - DOMAINS=${PLEX_HOSTNAME}
+      - IP4_PROVIDER=cloudflare.trace
+      - IP6_PROVIDER=none
+      - PROXIED=false
+      - UPDATE_CRON=*/5 * * * *
+      - TZ=${TZ}
+    networks:
+      - arrstack_network
+    read_only: true
+    cap_drop:
+      - all
+    restart: unless-stopped
+```
+
+Note the env-var name shift: in `.env` we use `CF_API_TOKEN`; the DDNS container expects `CLOUDFLARE_API_TOKEN` (compose maps it). Caddy uses `CF_API_TOKEN` directly.
+
+Append to `env.example` (and to the runtime `.env` with real values):
+
+```dotenv
+CF_API_TOKEN=<your token from 16b>
+PLEX_HOSTNAME=plex.example.com
+PUBLIC_DOMAIN=example.com
+```
+
+### 17e. Update deploy.sh to sync the caddy/ subtree
+
+Add this block to `scripts/deploy.sh` after the existing rsync of compose + env.example:
+
+```bash
+if [ -d "$REPO_DIR/caddy" ]; then
+  echo "==> Syncing caddy/ (Caddyfile + Dockerfile) to deploy dir"
+  sudo mkdir -p "$DEPLOY_DIR/caddy"
+  sudo rsync -a --delete --chown=arrstack:arrstack \
+    "$REPO_DIR/caddy/" \
+    "$DEPLOY_DIR/caddy/"
+
+  # Ensure runtime state dirs exist on drive 1 (Caddy writes certs there)
+  if [ -f "$DEPLOY_DIR/.env" ]; then
+    ARR1_ROOT="$(sudo grep '^ARR1_ROOT=' "$DEPLOY_DIR/.env" | cut -d= -f2-)"
+    if [ -n "$ARR1_ROOT" ]; then
+      sudo mkdir -p "$ARR1_ROOT/config/caddy/data" "$ARR1_ROOT/config/caddy/config"
+      sudo chown -R arrstack:arrstack "$ARR1_ROOT/config/caddy"
+    fi
+  fi
+fi
+```
+
+### 17f. Build and deploy
+
+```bash
+bash ~/code/arrStack/scripts/deploy.sh
+arrcompose build caddy
+arrcompose up -d caddy cloudflare-ddns
+arrcompose logs --tail=30 -f caddy
+```
+
+The `build caddy` step takes ~1-2 minutes (downloads the Go toolchain, compiles Caddy with the plugin). Once it's running, watch the logs for:
+
+```
+"msg":"trying to solve challenge","challenge_type":"dns-01"
+"msg":"certificate obtained successfully","identifier":"plex.example.com"
+```
+
+That's the end-to-end success — DNS-01 validated, Let's Encrypt issued the cert.
+
+### 17g. Configure Plex
+
+Plex Web → `Settings → Server → Network`:
+
+- **Custom server access URLs**: `https://plex.example.com:8443, http://192.168.1.88:32400`
+  - Comma-separated. Public first, LAN second. Plex publishes both; clients try in order.
+- **Enable Remote Access**: **uncheck**. With Caddy as the public path, leaving Plex's own remote-access on causes the mobile/desktop apps to advertise multiple connection paths to plex.tv. Apps may pick the failed direct path first and throw "Decoder: init failed" errors.
+- **Secure connections**: **Preferred** (not Required). LAN clients keep using HTTP via the local IP (no cert mismatch); remote clients use HTTPS via Caddy.
+
+Save.
+
+### 17h. Verify
+
+From a phone on cellular (off WiFi):
+
+1. Open `https://plex.example.com:8443` in a browser. Plex web UI loads, valid Let's Encrypt lock icon.
+2. Open the Plex *app*, sign in if needed, play a media file. Should connect direct via Caddy with no Plex Relay banner.
+3. From the host, inspect the cert from outside (the local network can't talk to its own public IP via hairpin NAT on most routers, so this needs to be from cellular or use `--resolve` for a local test):
+   ```bash
+   curl -vI --resolve plex.example.com:8443:127.0.0.1 https://plex.example.com:8443/ 2>&1 | grep -E "issuer|subject"
+   ```
+
+LAN clients are unaffected — Plex's `LAN Networks` setting still classifies them via pasta source-IP preservation, and they use `http://192.168.1.88:32400` directly.
+
+---
+
+## Phase 2 (still deferred)
 
 The following are out of scope for this tutorial. Each is doable but introduces its own design trade-offs:
 
 - **Cloudflare Tunnel for *arr admin UIs / Seerr**: straightforward addition. Add a `cloudflared` service to the compose, set `CF_TOKEN` in `.env`, configure your tunnel's public hostnames to forward to `http://radarr:7878` etc. **Do NOT tunnel Plex via the free Cloudflare plan** — Cloudflare's TOS § 2.8 prohibits proxying video, and tunnels regularly get terminated for streaming.
-- **Plex remote access**: separate path from the *arr UIs. Options include Plex's own remote access (NAT-PMP / port-forward), Tailscale, ZeroTier, or paid CF plans. Each has its own trade-offs around latency, NAT, mobile-data behaviour, and authentication. Decide based on your needs.
+- **Tailscale for personal access**: alternative to Section 16's public path. Each device installs Tailscale, gets a Tailscale IP, reaches Plex over the overlay network. No public ports needed, but only works on devices that can install Tailscale (your own; not arbitrary smart TVs / family members' devices).
 - **Jellyfin with GPU passthrough**: rootless Docker can pass through `/dev/dri` devices, but the `arrstack` user needs membership in the host's `render` and `video` groups. Add the Jellyfin service to the compose with `group_add` + `devices` blocks once you've confirmed your hardware path.
 - **Homepage configuration**: dashboard YAML at `/mnt/arr1/mediaServer/config/homepage/services.yaml`. Use service names (`radarr`, `sonarr`, etc.) as hostnames in widget configs — they survive any future host IP changes.
+- **Reverse-proxy for *arr UIs at `radarr.example.com` etc.**: extend the Caddy config from Section 16 with one block per service. Caddyfile gains:
+  ```
+  {$RADARR_HOSTNAME} {
+      reverse_proxy radarr:7878
+  }
+  ```
+  Pair with auth (e.g. Authelia or Caddy's `basic_auth` directive) since these aren't Plex-grade-protected. Add the same DNS records and DDNS targets.
 
 ---
 
@@ -787,6 +1110,15 @@ The following are out of scope for this tutorial. Each is doable but introduces 
 | Plex shows clients with bridge gateway IPs (172.x or 10.x) | pasta not engaged | Re-check `override.conf`; verify rootlesskit args contain `--net=pasta` |
 | `docker-rootless-extras` doesn't exist via `pacman` | It's only in AUR on Arch | `yay -S docker-rootless-extras` |
 | `dockerd-rootless-setuptool.sh: command not found` | AUR package doesn't ship it | You don't need it — the systemd user unit is pre-installed |
+| Caddy log claims success but `ss -tlnp 'sport = :80'` is empty | Rootless Docker can't bind privileged ports without sysctl | `echo 'net.ipv4.ip_unprivileged_port_start=80' \| sudo tee /etc/sysctl.d/99-arrstack-rootless.conf && sudo sysctl --system` (Section 8a) |
+| ACME HTTP-01 challenge times out from outside | ISP blocks inbound port 80 (common on residential, e.g. Vodafone IE) | Switch to ACME DNS-01 via the `caddy-dns/cloudflare` plugin (Section 16d) |
+| Router rejects port 443 in port-forward UI: "Invalid port number" | ISP router reserves 443 for its own admin UI | Use 8443 in both Local Port and Remote Port fields; map host 8443 → container 443 in compose |
+| Static IP set in NetworkManager GUI but `ip addr` shows old IP | GUI saves profile but doesn't apply until reconnect | `nmcli con down <name> && nmcli con up <name>`, or toggle WiFi off/on |
+| Plex mobile app: "Decoder: init failed" on remote playback | Multiple advertised connection paths, app picks broken one | Plex Web → uncheck "Enable Remote Access". Caddy URL is sufficient via Custom URLs |
+| `getent hosts <name>` returns Cloudflare anycast IPs after switching gray-cloud | Local resolver cached old proxied result | Use `getent ahostsv4 <name>` (IPv4-only) or DoH: `curl 'https://cloudflare-dns.com/dns-query?name=...&type=A' -H 'accept: application/dns-json'` |
+| `openssl s_client -connect <pub-host>:8443` from host returns "No route to host" | Hairpin NAT not supported by the router | Test from cellular instead, or use `--resolve <host>:8443:127.0.0.1` to talk to local Caddy with proper SNI |
+| Caddy DNS-01 fails: `HTTP 403: Invalid access token` | Token typo in `.env`, or token rolled in CF | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify` |
+| `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path | Remove the empty dir Docker created, ensure the source file exists, retry |
 
 ---
 

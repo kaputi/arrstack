@@ -46,6 +46,28 @@ sudo rsync -a --chown=arrstack:arrstack \
   "$COMPOSE_SRC" "$ENVEX_SRC" \
   "$DEPLOY_DIR/"
 
+if [ -d "$REPO_DIR/caddy" ]; then
+  # Caddy's Caddyfile + Dockerfile live in the deploy dir alongside the
+  # compose file (so compose's `build: ./caddy` directive resolves correctly).
+  # Caddy's runtime state (data/, config/ dirs with cert storage) lives on
+  # drive 1 via the per-service config bind mounts in compose.
+  echo "==> Syncing caddy/ (Caddyfile + Dockerfile) to deploy dir"
+  sudo mkdir -p "$DEPLOY_DIR/caddy"
+  sudo rsync -a --delete --chown=arrstack:arrstack \
+    "$REPO_DIR/caddy/" \
+    "$DEPLOY_DIR/caddy/"
+
+  # Ensure the runtime state dirs exist on drive 1 (Caddy will write certs
+  # there). Read ARR1_ROOT from runtime .env to find the right path.
+  if [ -f "$DEPLOY_DIR/.env" ]; then
+    ARR1_ROOT="$(sudo grep '^ARR1_ROOT=' "$DEPLOY_DIR/.env" | cut -d= -f2-)"
+    if [ -n "$ARR1_ROOT" ]; then
+      sudo mkdir -p "$ARR1_ROOT/config/caddy/data" "$ARR1_ROOT/config/caddy/config"
+      sudo chown -R arrstack:arrstack "$ARR1_ROOT/config/caddy"
+    fi
+  fi
+fi
+
 # ---------- status -----------------------------------------------------------
 
 echo

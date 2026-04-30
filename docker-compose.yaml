@@ -171,6 +171,54 @@ services:
     restart: unless-stopped
 
   #---------------------------------------------------------------------------
+  # CADDY (Phase 2.1: TLS termination + reverse proxy for public Plex access)
+  # Host port 8443 → container 443 because the ISP router reserves port 443
+  # entirely (admin UI). Public URL is therefore https://plex.vasher.eu:8443.
+  #---------------------------------------------------------------------------
+  caddy:
+    build: ./caddy        # custom build with caddy-dns/cloudflare plugin (DNS-01)
+    container_name: caddy
+    volumes:
+      # Caddyfile lives in the deploy dir alongside the Dockerfile (relative
+      # path resolves to <compose-dir>/caddy/Caddyfile = /srv/arrstack/stack/caddy/Caddyfile).
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Runtime state (cert storage, auto-generated config) lives on drive 1
+      # like every other service's per-app dir.
+      - ${ARR1_ROOT}/config/caddy/data:/data
+      - ${ARR1_ROOT}/config/caddy/config:/config
+    environment:
+      - PLEX_HOSTNAME=${PLEX_HOSTNAME}
+      - CF_API_TOKEN=${CF_API_TOKEN}     # used by caddy-dns/cloudflare for DNS-01
+    networks:
+      - arrstack_network
+    ports:
+      - 8443:443
+      - 8443:443/udp     # HTTP/3 (QUIC); harmless even if unused
+    restart: unless-stopped
+
+  #---------------------------------------------------------------------------
+  # CLOUDFLARE DDNS (Phase 2.1: keeps the public A record in sync with the
+  # home dynamic IPv4 every 5 minutes via the Cloudflare API.)
+  #---------------------------------------------------------------------------
+  cloudflare-ddns:
+    image: favonia/cloudflare-ddns:latest
+    container_name: cloudflare-ddns
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CF_API_TOKEN}
+      - DOMAINS=${PLEX_HOSTNAME}
+      - IP4_PROVIDER=cloudflare.trace
+      - IP6_PROVIDER=none
+      - PROXIED=false
+      - UPDATE_CRON=*/5 * * * *
+      - TZ=${TZ}
+    networks:
+      - arrstack_network
+    read_only: true
+    cap_drop:
+      - all
+    restart: unless-stopped
+
+  #---------------------------------------------------------------------------
   # TAUTULLI (host dir keeps the existing `tatulli` typo so the migrated DB
   # resolves cleanly; container-side path is `/config` regardless)
   #---------------------------------------------------------------------------
