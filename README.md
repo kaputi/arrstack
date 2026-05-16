@@ -1140,13 +1140,12 @@ Tailscale replaces `/etc/resolv.conf` with its own DNS resolver (`100.100.100.10
 Fix by giving the rootless daemon explicit public DNS servers:
 
 ```bash
-sudo mkdir -p /srv/arrstack/.config/docker
-sudo tee /srv/arrstack/.config/docker/daemon.json <<'EOF'
+sudo -u arrstack mkdir -p /home/arrstack/.config/docker
+sudo -u arrstack tee /home/arrstack/.config/docker/daemon.json > /dev/null <<'EOF'
 {
   "dns": ["1.1.1.1", "8.8.8.8"]
 }
 EOF
-sudo chown -R arrstack:arrstack /srv/arrstack/.config
 sudo systemctl --user --machine=arrstack@.host restart docker.service
 ```
 
@@ -1251,7 +1250,7 @@ The following are out of scope for this tutorial:
 | `openssl s_client -connect <pub-host>:443` from host returns "No route to host"               | Hairpin NAT not supported by the router                                                                    | Test from cellular instead, or use `--resolve <host>:443:127.0.0.1` to talk to local Caddy with proper SNI                                       |
 | Caddy DNS-01 fails: `HTTP 403: Invalid access token`                                          | Token typo in `.env`, or token rolled in CF                                                                | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify`                                     |                                                                                        |
 | `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path                                     | Remove the empty dir Docker created, ensure the source file exists, retry                                                                        |                                                                                        |
-| `arrcompose pull` fails: `Temporary failure in name resolution` after Tailscale install       | Tailscale replaced `/etc/resolv.conf` with its own DNS (`100.100.100.100`); rootless daemon can't reach it | Write `{"dns":["1.1.1.1","8.8.8.8"]}` to `/srv/arrstack/.config/docker/daemon.json` and restart the rootless daemon (Section 18d)                |                                                                                        |
+| `arrcompose pull` fails: `Temporary failure in name resolution` after Tailscale install       | Tailscale replaced `/etc/resolv.conf` with its own DNS (`100.100.100.100`); rootless daemon can't reach it | Write `{"dns":["1.1.1.1","8.8.8.8"]}` to `/home/arrstack/.config/docker/daemon.json` and restart the rootless daemon (Section 18d)               |                                                                                        |
 
 ---
 
