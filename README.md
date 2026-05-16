@@ -313,6 +313,8 @@ EOF
 > **Why `PORT_DRIVER=implicit`:** pasta is incompatible with `builtin` (the default) and rootlesskit refuses to start with `network "pasta" requires port driver "none" or "implicit"`. The `implicit` driver lets pasta handle port forwarding transparently — also the path that completes the source-IP-preservation chain.
 
 > **Note:** rootlesskit logs `"pasta" network driver is experimental` at startup. In practice it's stable for the workloads here (Plex, *arr UIs, Transmission); the warning is upstream's caution about API churn rather than runtime reliability.
+>
+> **Watch out for `passt` upgrades.** `passt` is a rolling-release upstream and some new releases have broken rootlesskit's invocation pattern, leaving the rootless Docker daemon unable to start after a routine system upgrade (symptom: `docker.service` fails and the journal shows `pasta failed with exit code 1` / `No interfaces with usable IPv4 routes`). If that happens, see *Recovering from a broken `passt` upgrade* in the Troubleshooting section. Once you've stabilized on a known-good `passt`, pin it so the next upgrade can't silently re-break things — pinning is distro-specific (Arch: `IgnorePkg`, Debian/Ubuntu: `apt-mark hold`, Fedora: `dnf versionlock`).
 
 ---
 
@@ -1237,6 +1239,7 @@ The following are out of scope for this tutorial:
 | Container fails with `permission denied` on bind mount                                        | `arrstack` doesn't own the path / can't traverse                                                           | `chown -R arrstack:arrstack <path>`; `setfacl -m u:arrstack:x` on parent                                                                         |                                                                                        |
 | `docker compose up` errors with `address already in use` on UDP/1900                          | Another LAN app (Spotify, KDE, etc.) holds SSDP                                                            | Drop `1900:1900/udp` from Plex's port list                                                                                                       |                                                                                        |
 | `docker.service` won't start: `network "pasta" requires port driver "none" or "implicit"`     | Wrong `PORT_DRIVER` value                                                                                  | Set `DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit`                                                                                          |                                                                                        |
+| `docker.service` fails after a routine system upgrade; journal shows `pasta failed with exit code 1` and `No interfaces with usable IPv4 routes` | A new upstream `passt` release broke rootlesskit's pasta integration | See *Recovering from a broken `passt` upgrade* below for the downgrade + pin recipe (Arch-first; other distros pin with their own mechanism) |                                                                                        |
 | `arrstack` group membership not visible in current shell                                      | New group memberships only apply to new sessions                                                           | `newgrp arrstack` in current shell, or log out and back in                                                                                       |                                                                                        |
 | Plex shows clients with bridge gateway IPs (172.x or 10.x)                                    | pasta not engaged                                                                                          | Re-check `override.conf`; verify rootlesskit args contain `--net=pasta`                                                                          |                                                                                        |
 | `docker-rootless-extras` doesn't exist via `pacman`                                           | It's only in AUR on Arch                                                                                   | `yay -S docker-rootless-extras`                                                                                                                  |                                                                                        |
@@ -1251,6 +1254,62 @@ The following are out of scope for this tutorial:
 | Caddy DNS-01 fails: `HTTP 403: Invalid access token`                                          | Token typo in `.env`, or token rolled in CF                                                                | Verify with `curl -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify`                                     |                                                                                        |
 | `docker compose up` fails: "not a directory: Are you trying to mount a directory onto a file" | Bind-mount source missing — Docker auto-created a dir at the file path                                     | Remove the empty dir Docker created, ensure the source file exists, retry                                                                        |                                                                                        |
 | `arrcompose pull` fails: `Temporary failure in name resolution` after Tailscale install       | Tailscale replaced `/etc/resolv.conf` with its own DNS (`100.100.100.100`); rootless daemon can't reach it | Write `{"dns":["1.1.1.1","8.8.8.8"]}` to `/home/arrstack/.config/docker/daemon.json` and restart the rootless daemon (Section 18d)               |                                                                                        |
+
+### Recovering from a broken `passt` upgrade
+
+If `docker.service` fails to start (or fails to *re*-start after a `pacman -Syu`) and the journal contains lines like:
+
+```
+pasta[…]: No interfaces with usable IPv4 routes
+pasta[…]: IPv4: no external interface as template, use local mode
+pasta[…]: Dual stack forward, but IPv6 not enabled
+[rootlesskit:parent] error: failed to setup network ...: pasta failed with exit code 1
+```
+
+…you've been hit by a new upstream `passt` release that broke rootlesskit's invocation pattern. Switching the network driver back to `slirp4netns` would mask the symptom, but it regresses Plex's LAN detection of direct-play clients (see Section 8b's "Why `pasta`"). Fix the right way instead: downgrade `passt`, pin it, restart docker.
+
+**1. Confirm the diagnosis.** Make sure `passt` was actually upgraded around the time the breakage started:
+
+```bash
+grep passt /var/log/pacman.log | tail -5
+```
+
+You should see a recent `upgraded passt (<old> -> <new>)` line. If `passt` was untouched, look elsewhere — this recipe won't help.
+
+**2. Get a known-good `passt`.** At time of writing, `passt 2026_01_20.386b5f5-1` is verified to work with `rootlesskit 3.0.0` + `docker-rootless-extras 29.4.x`. Grab the package and its signature from the Arch archive:
+
+```bash
+cd /tmp && curl -fL --proto '=https' --tlsv1.2 \
+  -O https://archive.archlinux.org/packages/p/passt/passt-2026_01_20.386b5f5-1-x86_64.pkg.tar.zst \
+  -O https://archive.archlinux.org/packages/p/passt/passt-2026_01_20.386b5f5-1-x86_64.pkg.tar.zst.sig
+sudo pacman -U /tmp/passt-2026_01_20.386b5f5-1-x86_64.pkg.tar.zst
+```
+
+`pacman -U` verifies the `.sig` against your local keyring automatically when it sits next to the `.zst`. Newer or older `passt` versions may also work — the recipe is the same; substitute whichever version your testing confirms.
+
+**3. Pin `passt`** so the next upgrade can't silently re-install the broken version. Open `/etc/pacman.conf` and append:
+
+```
+# Pinned <YYYY-MM-DD>: passt <broken-version> broke rootlesskit pasta networking.
+# Remove this pin once upstream cuts a fix and verify pasta still works.
+IgnorePkg = passt
+```
+
+> **On other distros:** `IgnorePkg` is pacman-specific. Use your package manager's equivalent — `sudo apt-mark hold passt` on Debian/Ubuntu (and source the older `.deb` from `https://snapshot.debian.org/`), `sudo dnf versionlock add passt` on Fedora/RHEL (requires the `python3-dnf-plugin-versionlock` package; source the older RPM from Fedora Koji), or your distro's documented hold mechanism. The Arch-archive URL above is Arch-specific; the rest of the recipe (downgrade → pin → restart) translates directly.
+
+**4. Clean orphan rootlesskit state and restart docker.** Failed start attempts leave state-dirs under arrstack's runtime directory that can confuse the next run:
+
+```bash
+sudo systemctl --user --machine=arrstack@.host stop docker.service docker.socket
+sudo rm -rf /run/user/$(id -u arrstack)/dockerd-rootless /run/user/$(id -u arrstack)/containerd-rootless
+sudo systemctl --user --machine=arrstack@.host reset-failed docker.service
+sudo systemctl --user --machine=arrstack@.host start docker.service
+sudo systemctl --user --machine=arrstack@.host status docker --no-pager | head -15
+```
+
+Expect `Active: active (running)` and a child `rootlesskit` whose args contain `--net=pasta` and `--port-driver=implicit`. If containers were running before the breakage, `docker compose -f /srv/arrstack/stack/docker-compose.yaml up -d` brings them back.
+
+**Revisit when upstream fixes it.** Periodically check `passt`'s upstream release notes and rootlesskit's issue tracker. When a newer `passt` ships that successfully starts on your host, remove the `IgnorePkg = passt` line, run `pacman -Syu`, restart `docker.service`, and re-verify Plex source-IP preservation via Section 13's "Now Playing" check before considering the regression resolved.
 
 ---
 
