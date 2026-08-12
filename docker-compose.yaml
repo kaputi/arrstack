@@ -67,6 +67,7 @@ services:
     volumes:
       - ${ARR1_ROOT}/config/sonarr:/config
       - ${ARR1_ROOT}/media/series:/series
+      - ${ARR2_ROOT}/media/series:/series2
       - ${ARR1_ROOT}/downloads:/downloads
     networks:
       - arrstack_network
@@ -153,6 +154,7 @@ services:
       - ${ARR1_ROOT}/config/plex-transcode:/transcode
       - ${ARR1_ROOT}/media:/media
       - ${ARR2_ROOT}/media/movies:/movies2
+      - ${ARR2_ROOT}/media/series:/series2
     networks:
       - arrstack_network
     ports:
