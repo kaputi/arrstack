@@ -399,6 +399,28 @@ The previous decision ("Networking: pasta for source-IP preservation", 2026-04-2
 
 ---
 
+## 2026-06-03 — Tailscale `--accept-dns=false` as the reboot DNS-breakage workaround
+
+**Gotcha:** After a host restart, Tailscale rewrote `/etc/resolv.conf` to its MagicDNS resolver (`nameserver 100.100.100.100`) before that resolver was actually reachable, so the host went offline for DNS — every name lookup failed while `ping 1.1.1.1` (raw IP) still worked. This is the host-level cousin of the 2026-04-30 "Tailscale breaks rootless Docker DNS resolution" entry.
+
+**Decision:** Run `sudo tailscale set --accept-dns=false`. This tells Tailscale to stop managing `/etc/resolv.conf`, so the host reverts to its normal router DNS. The setting is persisted, so it also covers subsequent reboots. Chosen over re-enabling MagicDNS because we don't rely on tailnet (`*.ts.net`) hostnames anywhere.
+
+**Why the arrStack is unaffected:** container DNS does not read `/etc/resolv.conf` and does not depend on Tailscale's MagicDNS. The rootless daemon pins resolvers directly via `/home/arrstack/.config/docker/daemon.json` (`"dns": ["1.1.1.1","8.8.8.8"]`, from the 2026-04-30 fix), so every container resolves through public DNS regardless of host-level resolv.conf or `--accept-dns` state. Remote Radarr/Sonarr admin access is by **Tailscale IP** (`100.x:7878`/`:8989`), not MagicDNS name, so it survives `--accept-dns=false` — only tailnet hostname resolution is lost, which we don't use. Cloudflared (Seerr tunnel) is outbound-only and uses container DNS, also unaffected.
+
+**Keep the `daemon.json` dns override regardless.** It's what insulates the stack here. If MagicDNS is ever re-enabled (`--accept-dns=true`), that override is what prevents the rootless-daemon DNS failure from recurring.
+
+**Verification (run 2026-06-03, confirmed healthy):** `sudo -iu arrstack docker exec radarr cat /etc/resolv.conf` shows `nameserver 127.0.0.11` (Docker's embedded resolver — expected on the user-defined bridge, it provides inter-container service-name resolution) with a `# ExtServers: [1.1.1.1 8.8.8.8]` line. The ExtServers values are the `daemon.json` upstreams; the absence of `100.100.100.100` is the thing to confirm. (Running containers use plain names, e.g. `radarr` — the `-test` suffix from the staging working tree is not applied to the live stack.)
+
+**For the tutorial:** in the Tailscale section, note that MagicDNS can race host networking at boot and take DNS offline; `--accept-dns=false` is the durable fix when you address tailnet hosts by IP rather than name. The container-DNS override from Section 18d is independent and should stay.
+
+**If you want MagicDNS back later (revisit checklist):** the only reason to re-enable is name-based access to *multiple* tailnet devices, or split-DNS for internal hostnames. Until then, leave it off. When/if you do re-enable:
+1. **Don't just flip `--accept-dns=true` and hope** — that reproduces the boot race. Instead, make Tailscale integrate with `systemd-resolved` so it installs split-DNS per-interface rather than clobbering `/etc/resolv.conf` wholesale. On this host that means `resolv.conf` should be the `systemd-resolved` stub (`ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf`) and `systemd-resolved.service` enabled *before* re-enabling accept-dns. Tailscale auto-detects resolved and uses the cleaner path.
+2. **Leave the container `daemon.json` dns override in place** (`["1.1.1.1","8.8.8.8"]`). It's what keeps the rootless daemon from inheriting an unreachable MagicDNS resolver — the 2026-04-30 failure mode — and it's harmless when MagicDNS works.
+3. **Re-verify after reboot**, not just immediately: `dig` a tailnet name from the host, and re-run the container check (`docker exec radarr cat /etc/resolv.conf` → ExtServers must stay `1.1.1.1 8.8.8.8`, never `100.100.100.100`).
+4. **Cheaper middle ground if you only need a name or two:** skip MagicDNS entirely and add static `100.x  <name>` lines to the host `/etc/hosts`. Stable (Tailscale IPs persist per device), survives reboots, zero resolv.conf management.
+
+---
+
 ## Open / pending decisions
 
 - **Static IP** (`192.168.1.88` on `wlp7s0`): user to choose router DHCP reservation vs NetworkManager static. Either works; setup happens before Plex first-boot config (Task 13 step 0).
