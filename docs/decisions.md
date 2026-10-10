@@ -421,6 +421,25 @@ The previous decision ("Networking: pasta for source-IP preservation", 2026-04-2
 
 ---
 
+## 2026-10-10 — ISP router → OPNsense: what the arrStack needs from the router
+
+**Context:** the eir ISP router is being replaced by an OPNsense box (old Acer, router-on-a-stick behind a GS308E switch, EAP610 AP). The LAN keeps `192.168.1.0/24` with the gateway on `.254`, and the host keeps `192.168.1.88`, so UFW rules, Plex "LAN Networks" and every fixed-IP setting carry over untouched. Full router plan lives outside this repo (`~/claudeProjects/homelab_decisions.md`, section 5).
+
+**Unaffected by the router swap (verified with the house on OPNsense):** Seerr via CF Tunnel (outbound-only), DDNS (WAN gets a public eir IP by DHCP, no CGNAT; favonia updates the A record as usual), container DNS (`daemon.json` resolvers) and host DNS (static `1.1.1.1`), so router DNS problems can't break the stack itself.
+
+**Three router settings the stack depends on** (the eir router did the first and third implicitly; OPNsense does none of them by default):
+1. **Port forward WAN TCP+UDP 8443 → `192.168.1.88:8443`** for Plex remote via Caddy. On current OPNsense this lives under Firewall → NAT → **Destination NAT** (the old "Port Forward" page was renamed); use "Single port or range" for the ports, Firewall rule = Pass.
+2. **Unbound private domain `plex.direct`.** Unbound's DNS rebind protection strips private-address answers, so `192-168-1-88.<id>.plex.direct` came back empty and LAN Plex clients lost the secure local connection (risking the "remote, throttled" Shield behaviour that the pasta decision exists to prevent). Services → Unbound DNS → Advanced → Private Domains.
+3. **Unbound host override `plex.vasher.eu` → `192.168.1.88`** (split DNS). OPNsense doesn't hairpin by default, so the public URL timed out from the LAN. Chosen over NAT reflection: LAN traffic goes straight to Caddy, no extra NAT path, and the cert stays valid because it's DNS-01 issued. Gotcha: Dnsmasq (which does DHCP here) also has a "Hosts" page; an entry there does nothing for these DNS answers — it must be under Unbound → Overrides.
+
+**Also added: Caddy `http_redirect` listener wrapper.** Typing `plex.vasher.eu:8443` without a scheme sent plain HTTP to the TLS port and got an error. The wrapper answers with a 308 to `https://` on the same port (Location is built from the Host header, so `:8443` is kept). Router-independent, but found during this test.
+
+**Still open:** Tailscale reports `MappingVariesByDestIP: true` behind OPNsense (port-randomizing outbound NAT), so remote Radarr/Sonarr goes through the DERP relay. Works, just slower. Fix if wanted: outbound NAT hybrid mode + static-port rule for `192.168.1.88` UDP 41641. With the eir router gone, the "Public Plex port is 8443" workaround can also be retired (see that entry's Future list).
+
+**For the tutorial:** a "replacing the ISP router" checklist: port forward, `plex.direct` private domain, split-DNS override for the public hostname. Verify the first from a phone on mobile data (not from the LAN), the other two by querying the router's DNS directly.
+
+---
+
 ## Open / pending decisions
 
 - **Static IP** (`192.168.1.88` on `wlp7s0`): user to choose router DHCP reservation vs NetworkManager static. Either works; setup happens before Plex first-boot config (Task 13 step 0).

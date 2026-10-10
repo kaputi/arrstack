@@ -8,6 +8,19 @@
 # DNS-01 only needs outbound HTTPS to api.cloudflare.com, which always
 # works. Requires the caddy-dns/cloudflare plugin — see ./Dockerfile.
 
+# http_redirect: a plain-HTTP request arriving on the HTTPS port (e.g. typing
+# plex.example.com:8443 without https://) gets a 308 to the same URL over
+# HTTPS instead of a 400. The port is kept, since Location uses the request's
+# Host header. Must come before `tls`.
+{
+    servers {
+        listener_wrappers {
+            http_redirect
+            tls
+        }
+    }
+}
+
 {$PLEX_HOSTNAME} {
     reverse_proxy plex:32400
     tls {
