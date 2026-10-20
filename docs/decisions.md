@@ -423,7 +423,7 @@ The previous decision ("Networking: pasta for source-IP preservation", 2026-04-2
 
 ## 2026-10-10 — ISP router → OPNsense: what the arrStack needs from the router
 
-**Context:** the eir ISP router is being replaced by an OPNsense box (old Acer, router-on-a-stick behind a GS308E switch, EAP610 AP). The LAN keeps `192.168.1.0/24` with the gateway on `.254`, and the host keeps `192.168.1.88`, so UFW rules, Plex "LAN Networks" and every fixed-IP setting carry over untouched. Full router plan lives outside this repo (`~/claudeProjects/homelab_decisions.md`, section 5).
+**Context:** the eir ISP router is being replaced by an OPNsense box (old Acer, router-on-a-stick behind a GS308E switch, EAP610 AP). The LAN keeps `192.168.1.0/24` with the gateway on `.254`, and the host keeps `192.168.1.88`, so UFW rules, Plex "LAN Networks" and every fixed-IP setting carry over untouched. Full router plan lives outside this repo (`~/claudeProjects/homelab/README.md`, section 5).
 
 **Unaffected by the router swap (verified with the house on OPNsense):** Seerr via CF Tunnel (outbound-only), DDNS (WAN gets a public eir IP by DHCP, no CGNAT; favonia updates the A record as usual), container DNS (`daemon.json` resolvers) and host DNS (static `1.1.1.1`), so router DNS problems can't break the stack itself.
 
@@ -434,9 +434,27 @@ The previous decision ("Networking: pasta for source-IP preservation", 2026-04-2
 
 **Also added: Caddy `http_redirect` listener wrapper.** Typing `plex.vasher.eu:8443` without a scheme sent plain HTTP to the TLS port and got an error. The wrapper answers with a 308 to `https://` on the same port (Location is built from the Host header, so `:8443` is kept). Router-independent, but found during this test.
 
-**Still open:** Tailscale reports `MappingVariesByDestIP: true` behind OPNsense (port-randomizing outbound NAT), so remote Radarr/Sonarr goes through the DERP relay. Works, just slower. Fix if wanted: outbound NAT hybrid mode + static-port rule for `192.168.1.88` UDP 41641. With the eir router gone, the "Public Plex port is 8443" workaround can also be retired (see that entry's Future list).
+**Tailscale static port (rule added, verify at next router boot):** OPNsense's outbound NAT randomizes source ports per destination (`MappingVariesByDestIP: true`), which pushes remote Radarr/Sonarr onto the DERP relay. Fix: a Source NAT rule (the new name for Outbound NAT) for `192.168.1.88` UDP port 41641 with Static-port, translation = WAN address. Gotchas: existing NAT states keep their random ports and Tailscale's keepalives stop them expiring; `pfctl -k <LAN host>` doesn't match them on FreeBSD (it matches the post-NAT address), so a router reboot is the reliable reset. `tailscale netcheck` can't verify the fix (the CLI probes from a random port); check `tailscale status --json` Self.Addrs or the router's `pfctl -s state` for `<WAN IP>:41641` instead. With the eir router gone, the "Public Plex port is 8443" workaround can also be retired (see that entry's Future list).
 
 **For the tutorial:** a "replacing the ISP router" checklist: port forward, `plex.direct` private domain, split-DNS override for the public hostname. Verify the first from a phone on mobile data (not from the LAN), the other two by querying the router's DNS directly.
+
+---
+
+## 2026-10-20 — MagicDNS back on, via `systemd-resolved` (reverses 2026-06-03)
+
+**Why now:** the host needs to reach several tailnet devices by name (`chromebook-langoliers`, `debian`), which is the re-enable reason the 2026-06-03 checklist names. We followed that checklist.
+
+**Decision:** enable `systemd-resolved`, point `/etc/resolv.conf` at the stub, restart NetworkManager and tailscaled, then run `sudo tailscale set --accept-dns=true`. Tailscale detects resolved and configures split DNS on `tailscale0` instead of rewriting `/etc/resolv.conf`. `100.100.100.100` only answers `~ts.net`, the tailnet domain and the `100.x` reverse zones (`Default Route: no`). All other names still go to the `wlp7s0` resolvers (`1.1.1.1 8.8.8.8 8.8.4.4`). The tailnet has no global nameservers, so the 2026-06-03 failure, where every lookup went through a 100.100.100.100 that wasn't reachable yet, can't happen this way.
+
+**Why the arrStack is unaffected:** the `daemon.json` dns override (2026-04-30) stays, so containers still resolve through `1.1.1.1 8.8.8.8`. The rootless daemon's own lookups (image pulls) now go through the host's resolved stub.
+
+**Gotcha: start order.** We started resolved while `/etc/resolv.conf` was still NetworkManager's file. resolved read it as outside config and kept those servers as its Global DNS list, so the old values (`1.1.1.1 8.8.8.8 4.4.4.4`) stuck around even after the symlink was switched. `systemctl restart systemd-resolved` cleared it. Swap the symlink before starting resolved, or restart resolved afterwards.
+
+**Verification (after a reboot, 2026-10-20):** `resolvectl dns` lists `100.100.100.100` on `tailscale0` only and an empty Global list. `getent hosts chromebook-langoliers` / `debian` return their `100.x` addresses, and public names resolve. `docker exec radarr cat /etc/resolv.conf` still shows `ExtServers: [1.1.1.1 8.8.8.8]` with no `100.100.100.100`. `docker pull hello-world` works.
+
+**Rollback:** `sudo tailscale set --accept-dns=false`, `sudo rm /etc/resolv.conf`, `sudo systemctl disable --now systemd-resolved`, `sudo systemctl restart NetworkManager` (NM writes a fresh resolv.conf).
+
+**For the tutorial:** if MagicDNS is wanted, set up resolved and the stub symlink *before* enabling `--accept-dns`, and keep the Section 18d container override in place either way.
 
 ---
 
